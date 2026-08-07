@@ -7,7 +7,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=15";
+} from "./stitcher.js?v=16";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -222,11 +222,12 @@ function fitPaneZoom(id) {
     applyPaneZoom(id);
     return;
   }
-  const availW = Math.max(40, p.wrap.clientWidth - 24);
-  const availH = Math.max(40, p.wrap.clientHeight - 24);
+  const availW = Math.max(40, p.wrap.clientWidth - 16);
+  const availH = Math.max(40, p.wrap.clientHeight - 16);
   const sx = availW / p.canvas.width;
   const sy = availH / p.canvas.height;
-  p.zoom = Math.min(1.15, Math.max(0.08, Math.min(sx, sy) * 0.96));
+  // Fill the right pane — no low zoom cap that leaves a tiny montage window
+  p.zoom = Math.min(4, Math.max(0.08, Math.min(sx, sy) * 0.98));
   p.panX = (p.wrap.clientWidth - p.canvas.width * p.zoom) / 2;
   p.panY = (p.wrap.clientHeight - p.canvas.height * p.zoom) / 2;
   applyPaneZoom(id);
@@ -314,9 +315,12 @@ function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(padded, 0, 0);
   p.wrap.classList.add("has-result");
-  // Keep current zoom; only auto-fit the first time content appears
-  if (!hadContent && !p.userZoomed) fitPaneZoom(id);
-  else applyPaneZoom(id);
+  // Keep current zoom; only auto-fit the first time content appears (after layout)
+  if (!hadContent && !p.userZoomed) {
+    requestAnimationFrame(() => fitPaneZoom(id));
+  } else {
+    applyPaneZoom(id);
+  }
   updateButtons();
 }
 

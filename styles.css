@@ -377,6 +377,8 @@ body.dragging-work .thumb {
   gap: 0.35rem;
   min-width: 0;
   min-height: 0;
+  height: 100%;
+  align-self: stretch;
 }
 
 .status-row {
@@ -401,7 +403,6 @@ body.dragging-work .thumb {
   color: var(--danger);
 }
 
-.review-bar,
 .live-conf {
   display: flex;
   flex-wrap: wrap;
@@ -413,20 +414,8 @@ body.dragging-work .thumb {
   background: rgba(36, 56, 41, 0.75);
 }
 
-.review-bar[hidden],
 .live-conf[hidden] {
   display: none;
-}
-
-.review-msg {
-  margin: 0;
-  flex: 1 1 10rem;
-  font-size: 0.9rem;
-}
-
-.review-actions {
-  display: flex;
-  gap: 0.4rem;
 }
 
 .live-conf-label {
@@ -474,20 +463,27 @@ body.dragging-work .thumb {
   gap: 0.45rem;
   min-height: 0;
   height: 100%;
+  align-self: stretch;
 }
 
 .panes.single {
-  grid-template-rows: 1fr;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.panes.single > .work-pane {
+  height: 100%;
+  min-height: 0;
 }
 
 .panes.single #paneB[hidden] {
-  display: none;
+  display: none !important;
 }
 
 .work-pane {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
+  height: 100%;
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: rgba(15, 26, 20, 0.55);
@@ -525,6 +521,7 @@ body.dragging-work .thumb {
 .preview-wrap {
   position: relative;
   min-height: 0;
+  height: 100%;
   overflow: hidden;
   cursor: grab;
   touch-action: none;
@@ -568,7 +565,11 @@ body.dragging-work .thumb {
   text-align: center;
   color: var(--muted);
   pointer-events: none;
-  font-size: 0.92rem;
+  font-size: 1.05rem;
+  background: rgba(10, 18, 14, 0.25);
+  border: 1.5px dashed rgba(196, 232, 106, 0.28);
+  border-radius: 10px;
+  margin: 0.65rem;
 }
 
 .preview-wrap.has-result .preview-empty {
