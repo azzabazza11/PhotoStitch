@@ -8,7 +8,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=9";
+} from "./stitcher.js?v=10";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -20,10 +20,12 @@ const countsEl = document.getElementById("counts");
 const clearBtn = document.getElementById("clearBtn");
 const undoBtn = document.getElementById("undoBtn");
 const downloadBtn = document.getElementById("downloadBtn");
+const workspace2Btn = document.getElementById("workspace2Btn");
 const matchBtn = document.getElementById("matchBtn");
 const lockBtn = document.getElementById("lockBtn");
 const unlockBtn = document.getElementById("unlockBtn");
 const returnBtn = document.getElementById("returnBtn");
+const panesEl = document.getElementById("panes");
 const cropInput = document.getElementById("crop");
 const thresholdInput = document.getElementById("threshold");
 const thresholdOut = document.getElementById("thresholdOut");
@@ -74,6 +76,32 @@ const panes = {
 
 /** @type {"a" | "b"} */
 let focusedPane = "a";
+let workspaceBVisible = false;
+
+function setWorkspaceBVisible(on) {
+  workspaceBVisible = Boolean(on);
+  panes.b.el.hidden = !workspaceBVisible;
+  panesEl.classList.toggle("single", !workspaceBVisible);
+  workspace2Btn.setAttribute("aria-pressed", workspaceBVisible ? "true" : "false");
+  workspace2Btn.textContent = workspaceBVisible ? "Hide B" : "+ Workspace";
+  if (!workspaceBVisible && focusedPane === "b") {
+    setFocusedPane("a", { fit: true });
+  } else if (workspaceBVisible) {
+    fitPaneZoom("a");
+    fitPaneZoom("b");
+  } else {
+    fitPaneZoom("a");
+  }
+}
+
+function toggleWorkspaceB() {
+  setWorkspaceBVisible(!workspaceBVisible);
+  setStatus(
+    workspaceBVisible
+      ? "Workspace B shown — drop a second montage here."
+      : "Workspace B hidden — A uses the full area."
+  );
+}
 
 /** @type {{ id: string, file: File, url: string, img: HTMLImageElement }[]} */
 let loaded = [];
@@ -162,6 +190,9 @@ function pane(id = focusedPane) {
 }
 
 function setFocusedPane(id, { fit = false } = {}) {
+  if (id === "b" && !workspaceBVisible) {
+    setWorkspaceBVisible(true);
+  }
   focusedPane = id;
   for (const p of Object.values(panes)) {
     p.el.classList.toggle("focused", p.id === id);
@@ -979,6 +1010,7 @@ function setLiveConf(score, weakArea = false) {
 
 function paneAtPoint(clientX, clientY) {
   for (const id of /** @type {const} */ (["a", "b"])) {
+    if (id === "b" && !workspaceBVisible) continue;
     const rect = panes[id].wrap.getBoundingClientRect();
     if (
       clientX >= rect.left &&
@@ -1851,6 +1883,7 @@ matchBtn.addEventListener("click", matchSelected);
 lockBtn.addEventListener("click", lockSelected);
 unlockBtn.addEventListener("click", unlockSelected);
 returnBtn.addEventListener("click", returnSelectedToRail);
+workspace2Btn.addEventListener("click", toggleWorkspaceB);
 
 window.addEventListener("resize", () => {
   for (const id of /** @type {const} */ (["a", "b"])) {
@@ -1858,6 +1891,7 @@ window.addEventListener("resize", () => {
   }
 });
 
+setWorkspaceBVisible(false);
 setFocusedPane("a");
 updateThumbSize();
 updateButtons();

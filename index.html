@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=9" />
+  <link rel="stylesheet" href="styles.css?v=10" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -18,7 +18,7 @@
     <header class="top">
       <div class="top-text">
         <p class="brand">PhotoStitch</p>
-        <p class="tag">Photos left · two workspaces right. Hover the rail to browse; drag into a pane to match.</p>
+        <p class="tag">Photos left · workspace right. Toggle a second workspace when you need another montage.</p>
       </div>
       <section class="controls" aria-label="Stitch settings">
         <label class="field">
@@ -39,6 +39,7 @@
           </select>
         </label>
         <div class="actions">
+          <button type="button" id="workspace2Btn" class="ghost" aria-pressed="false" title="Show or hide Workspace B">+ Workspace</button>
           <button type="button" id="matchBtn" class="ghost" disabled>Match</button>
           <button type="button" id="lockBtn" class="ghost" disabled>Lock</button>
           <button type="button" id="unlockBtn" class="ghost" disabled>Unlock</button>
@@ -98,7 +99,7 @@
           <span class="live-conf-value" id="liveConfValue">—</span>
         </section>
 
-        <div class="panes">
+        <div class="panes single" id="panes">
           <section class="work-pane focused" id="paneA" data-pane="a" tabindex="0" aria-label="Workspace A">
             <header class="pane-head">
               <span class="pane-title">Workspace A</span>
@@ -112,7 +113,7 @@
             </div>
           </section>
 
-          <section class="work-pane" id="paneB" data-pane="b" tabindex="0" aria-label="Workspace B">
+          <section class="work-pane" id="paneB" data-pane="b" tabindex="0" aria-label="Workspace B" hidden>
             <header class="pane-head">
               <span class="pane-title">Workspace B</span>
               <span class="pane-zoom" id="zoomB">100%</span>
@@ -134,6 +135,6 @@
   </div>
 
   <div id="dragGhost" class="drag-ghost" hidden></div>
-  <script type="module" src="app.js?v=9"></script>
+  <script type="module" src="app.js?v=10"></script>
 </body>
 </html>

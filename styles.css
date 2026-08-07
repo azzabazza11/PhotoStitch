@@ -468,6 +468,14 @@ body.dragging-work .thumb {
   height: 100%;
 }
 
+.panes.single {
+  grid-template-rows: 1fr;
+}
+
+.panes.single #paneB[hidden] {
+  display: none;
+}
+
 .work-pane {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
