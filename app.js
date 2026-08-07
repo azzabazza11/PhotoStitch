@@ -7,7 +7,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=14";
+} from "./stitcher.js?v=15";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -131,6 +131,9 @@ let busy = false;
 let dragIndex = null;
 let dragMoved = false;
 let pointerId = null;
+/** Grab point within the tile (pixels from top-left) — keeps drag relative to click */
+/** @type {{ x: number, y: number }} */
+let dragGrab = { x: 0, y: 0 };
 /** @type {HTMLCanvasElement | null} */
 let dragBaseCanvas = null;
 /** @type {HTMLCanvasElement | null} */
@@ -987,8 +990,8 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
 
   const mapped = canvasPointerToLocal(p, clientX, clientY);
   if (!mapped) return false;
-  const drawX = mapped.localX - tiles[movingIndex].width / 2;
-  const drawY = mapped.localY - tiles[movingIndex].height / 2;
+  const drawX = mapped.localX - dragGrab.x;
+  const drawY = mapped.localY - dragGrab.y;
 
   const ctx = p.canvas.getContext("2d");
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
@@ -1047,9 +1050,43 @@ function clearMontageDragPreview() {
   dragCoreCanvas = null;
   dragBaseOrigin = null;
   dragPad = { x: 0, y: 0 };
+  dragGrab = { x: 0, y: 0 };
   dragScoreTimer = 0;
   dragTargetPane = null;
   for (const p of Object.values(panes)) p.el.classList.remove("drop-hot");
+}
+
+function grabOffsetFromThumb(wrap, tileIndex, clientX, clientY) {
+  const t = tiles[tileIndex];
+  const img = wrap.querySelector?.(".thumb") || wrap;
+  const r = img.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) {
+    return { x: t.width / 2, y: t.height / 2 };
+  }
+  return {
+    x: Math.max(0, Math.min(t.width, ((clientX - r.left) / r.width) * t.width)),
+    y: Math.max(0, Math.min(t.height, ((clientY - r.top) / r.height) * t.height)),
+  };
+}
+
+function grabOffsetFromPane(paneId, tileIndex, clientX, clientY) {
+  const t = tiles[tileIndex];
+  const p = panes[paneId];
+  const mapped = canvasPointerToLocal(p, clientX, clientY);
+  if (!mapped) return { x: t.width / 2, y: t.height / 2 };
+  const gid = groupForPane(paneId);
+  if (!gid || !groups.get(gid)?.has(tileIndex)) {
+    return { x: t.width / 2, y: t.height / 2 };
+  }
+  const abs = groups.get(gid);
+  const { origin } = compositeMontage(tiles, abs, null);
+  const pos = abs.get(tileIndex);
+  const tileX = pos.dx - origin.minX + (p.padX || 0);
+  const tileY = pos.dy - origin.minY + (p.padY || 0);
+  return {
+    x: Math.max(0, Math.min(t.width, mapped.localX - tileX)),
+    y: Math.max(0, Math.min(t.height, mapped.localY - tileY)),
+  };
 }
 
 function clearDropHighlights() {
@@ -1078,7 +1115,7 @@ function autoScrollRail(clientY) {
   });
 }
 
-function startDrag(e, index, originEl = null) {
+function startDrag(e, index, originEl = null, grabOffset = null) {
   if (busy) return;
   const tileId = tiles[index]?.id;
   if (!tileId) return;
@@ -1091,6 +1128,18 @@ function startDrag(e, index, originEl = null) {
   dragIndex = index;
   dragMoved = false;
   pointerId = e.pointerId;
+
+  if (grabOffset) {
+    dragGrab = { x: grabOffset.x, y: grabOffset.y };
+  } else if (originEl?.classList?.contains("thumb-wrap")) {
+    dragGrab = grabOffsetFromThumb(originEl, index, e.clientX, e.clientY);
+  } else {
+    dragGrab = {
+      x: tiles[index].width / 2,
+      y: tiles[index].height / 2,
+    };
+  }
+
   const captureEl = originEl || e.currentTarget;
   try {
     captureEl?.setPointerCapture?.(e.pointerId);
@@ -1136,14 +1185,15 @@ function startDrag(e, index, originEl = null) {
         return;
       }
 
-      // Empty pane (or sole-tile group lifted): show ghost
+      // Empty pane (or sole-tile group lifted): show ghost at grab point
       dragGhost.hidden = false;
       dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
       const size = Math.min(200, Math.max(100, tiles[index].width * panes[overPane].zoom * 0.35));
+      const gScale = size / Math.max(tiles[index].width, 1);
       dragGhost.style.width = `${size}px`;
       dragGhost.style.height = `${size}px`;
-      dragGhost.style.left = `${ev.clientX - size / 2}px`;
-      dragGhost.style.top = `${ev.clientY - size / 2}px`;
+      dragGhost.style.left = `${ev.clientX - dragGrab.x * gScale}px`;
+      dragGhost.style.top = `${ev.clientY - dragGrab.y * gScale}px`;
       hideLiveConf();
       setStatus(`Drop to start / place in Workspace ${overPane.toUpperCase()}.`, "busy");
       return;
@@ -1163,10 +1213,11 @@ function startDrag(e, index, originEl = null) {
     dragGhost.hidden = false;
     dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
     const size = 148;
+    const gScale = size / Math.max(tiles[index].width, 1);
     dragGhost.style.width = `${size}px`;
     dragGhost.style.height = `${size}px`;
-    dragGhost.style.left = `${ev.clientX - size / 2}px`;
-    dragGhost.style.top = `${ev.clientY - size / 2}px`;
+    dragGhost.style.left = `${ev.clientX - dragGrab.x * gScale}px`;
+    dragGhost.style.top = `${ev.clientY - dragGrab.y * gScale}px`;
 
     thumbs.classList.add("reorder-active");
 
@@ -1330,15 +1381,15 @@ async function finishDragPlace(movingIndex, clientX, clientY, rect, paneId) {
     const localX = (clientX - liveRect.left) * scaleX - padX;
     const localY = (clientY - liveRect.top) * scaleY - padY;
 
-    // Exact drop position (montage-local), no snap nudge
-    const placeDx = origin.minX + localX - tiles[movingIndex].width / 2;
-    const placeDy = origin.minY + localY - tiles[movingIndex].height / 2;
+    // Exact drop position using grab offset (no center-to-mouse jump)
+    const placeDx = origin.minX + localX - dragGrab.x;
+    const placeDy = origin.minY + localY - dragGrab.y;
 
     // Score at drop for feedback only (does not move the tile)
     let scoreNote = "";
     if (dragCoreCanvas) {
-      const coreX = localX - tiles[movingIndex].width / 2;
-      const coreY = localY - tiles[movingIndex].height / 2;
+      const coreX = localX - dragGrab.x;
+      const coreY = localY - dragGrab.y;
       const scored = scoreOverlapAt(dragCoreCanvas, tiles[movingIndex], coreX, coreY);
       if (scored.area >= 24 * 24) {
         scoreNote = ` Alignment ${scored.score.toFixed(2)}.`;
@@ -1715,7 +1766,7 @@ function bindPaneInteraction(paneId) {
     }
     e.preventDefault();
     e.stopPropagation();
-    startDrag(e, hit, p.canvas);
+    startDrag(e, hit, p.canvas, grabOffsetFromPane(paneId, hit, e.clientX, e.clientY));
   });
 }
 
