@@ -2,13 +2,12 @@ import {
   cropImage,
   effectiveCrop,
   matchTwoTiles,
-  snapNearOffset,
   scoreOverlapAt,
   paintAgreementOverlay,
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=13";
+} from "./stitcher.js?v=14";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -498,7 +497,7 @@ async function runPairMatch(idA, idB) {
     await yieldUi();
     const hit = matchTwoTiles(tiles[iA], tiles[iB], opts());
     if (!hit) {
-      setStatus("No confident match — try drag-snap or lower confidence.", "error");
+      setStatus("No confident match — align by dragging, or lower confidence.", "error");
       selection = [];
       renderThumbs();
       return;
@@ -581,7 +580,7 @@ async function runPairMatch(idA, idB) {
 }
 
 /**
- * Commit a join/snap/merge immediately (no Accept/Reject).
+ * Commit a join/place/merge immediately (no Accept/Reject).
  * @param {{
  *   paneId: "a"|"b",
  *   targetGroupId: string|null,
@@ -1022,7 +1021,7 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
   setStatus(
     weakArea
       ? "Drag so the tile overlaps the montage — confidence needs shared pixels."
-      : `Live alignment ${score.score.toFixed(2)} (NCC ${score.ncc.toFixed(2)}) — release to snap.`,
+      : `Live alignment ${score.score.toFixed(2)} (NCC ${score.ncc.toFixed(2)}) — release to place where it is.`,
     "busy"
   );
 
@@ -1246,7 +1245,7 @@ function startDrag(e, index, originEl = null) {
     if (overPane) {
       setFocusedPane(overPane);
       const rect = panes[overPane].canvas.getBoundingClientRect();
-      finishDragSnap(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
+      finishDragPlace(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
         clearMontageDragPreview();
       });
       return;
@@ -1254,7 +1253,7 @@ function startDrag(e, index, originEl = null) {
 
     clearMontageDragPreview();
     refreshAllPreviews();
-    setStatus("Drop on a workspace to snap, or on the left rail to return / shuffle.");
+    setStatus("Drop on a workspace to place, or on the left rail to return / shuffle.");
     setTimeout(() => {
       dragMoved = false;
     }, 0);
@@ -1265,10 +1264,14 @@ function startDrag(e, index, originEl = null) {
   window.addEventListener("pointercancel", onUp);
 }
 
-async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
+/**
+ * Place the tile exactly where dropped — no auto-snap.
+ * Live alignment meter + agreement tint guide the user while dragging.
+ */
+async function finishDragPlace(movingIndex, clientX, clientY, rect, paneId) {
   busy = true;
   updateButtons();
-  setStatus("Snapping…", "busy");
+  setStatus("Placing…", "busy");
 
   try {
     await yieldUi();
@@ -1292,7 +1295,7 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       updateCounts();
       updateButtons();
       setStatus(
-        `Started ${newG} in Workspace ${paneId.toUpperCase()} with “${tiles[movingIndex].name}”. Drag another tile onto it.`
+        `Started ${newG} in Workspace ${paneId.toUpperCase()} with “${tiles[movingIndex].name}”. Drag another tile onto it and align by eye.`
       );
       return;
     }
@@ -1316,51 +1319,41 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       return;
     }
 
-    const { canvas: montageCanvas, origin } = compositeMontage(tiles, baseAbs, null);
+    const { origin } = compositeMontage(tiles, baseAbs, null);
 
     const p = panes[paneId];
     const liveRect = p.canvas.width ? p.canvas.getBoundingClientRect() : rect;
     const padX = dragPad.x || p.padX || 0;
     const padY = dragPad.y || p.padY || 0;
-    const scaleX = (p.canvas.width || montageCanvas.width + padX * 2) / Math.max(1, liveRect.width);
-    const scaleY = (p.canvas.height || montageCanvas.height + padY * 2) / Math.max(1, liveRect.height);
+    const scaleX = (p.canvas.width || 1) / Math.max(1, liveRect.width);
+    const scaleY = (p.canvas.height || 1) / Math.max(1, liveRect.height);
     const localX = (clientX - liveRect.left) * scaleX - padX;
     const localY = (clientY - liveRect.top) * scaleY - padY;
 
-    const guessInMontage = {
-      dx: localX - tiles[movingIndex].width / 2,
-      dy: localY - tiles[movingIndex].height / 2,
-    };
+    // Exact drop position (montage-local), no snap nudge
+    const placeDx = origin.minX + localX - tiles[movingIndex].width / 2;
+    const placeDy = origin.minY + localY - tiles[movingIndex].height / 2;
 
-    const hit = snapNearOffset(
-      { canvas: montageCanvas },
-      tiles[movingIndex],
-      guessInMontage.dx,
-      guessInMontage.dy,
-      { ...opts(), radius: 140 }
-    );
-
-    if (!hit) {
-      setStatus("Snap failed — try a closer drop, or Match two thumbs.", "error");
-      refreshAllPreviews();
-      return;
+    // Score at drop for feedback only (does not move the tile)
+    let scoreNote = "";
+    if (dragCoreCanvas) {
+      const coreX = localX - tiles[movingIndex].width / 2;
+      const coreY = localY - tiles[movingIndex].height / 2;
+      const scored = scoreOverlapAt(dragCoreCanvas, tiles[movingIndex], coreX, coreY);
+      if (scored.area >= 24 * 24) {
+        scoreNote = ` Alignment ${scored.score.toFixed(2)}.`;
+      }
     }
 
-    const absDx = origin.minX + hit.dx;
-    const absDy = origin.minY + hit.dy;
     const alreadyHistoric = Boolean(wasInGroup && wasInGroup !== gid);
 
     applyJoin({
       paneId,
       targetGroupId: gid,
-      place: { index: movingIndex, dx: absDx, dy: absDy },
-      score: hit.score,
-      edge: hit.edge,
+      place: { index: movingIndex, dx: placeDx, dy: placeDy },
       realign: realigning,
       skipHistory: alreadyHistoric,
-      message: hit.weak
-        ? `Weak snap ${hit.score.toFixed(3)} · ${hit.edge} — drag again to refine.`
-        : `${realigning ? "Re-fit" : "Snapped"} ${hit.score.toFixed(3)} · ${hit.edge}. Drag again to refine, or Lock.`,
+      message: `${realigning ? "Re-placed" : "Placed"} at your drop.${scoreNote} Drag again to nudge, Match to auto-align, or Lock.`,
     });
   } finally {
     busy = false;
