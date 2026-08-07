@@ -6,7 +6,9 @@ import {
   scoreOverlapAt,
   paintAgreementOverlay,
   compositeMontage,
-} from "./stitcher.js?v=7";
+  padWorkspace,
+  workspacePadFor,
+} from "./stitcher.js?v=8";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -46,6 +48,8 @@ const panes = {
     groupId: null,
     /** @type {HTMLCanvasElement | null} */
     result: null,
+    padX: 0,
+    padY: 0,
   },
   b: {
     id: "b",
@@ -59,6 +63,8 @@ const panes = {
     groupId: null,
     /** @type {HTMLCanvasElement | null} */
     result: null,
+    padX: 0,
+    padY: 0,
   },
 };
 
@@ -109,8 +115,12 @@ let dragMoved = false;
 let pointerId = null;
 /** @type {HTMLCanvasElement | null} */
 let dragBaseCanvas = null;
+/** @type {HTMLCanvasElement | null} */
+let dragCoreCanvas = null;
 /** @type {{ minX: number, minY: number } | null} */
 let dragBaseOrigin = null;
+/** @type {{ x: number, y: number }} */
+let dragPad = { x: 0, y: 0 };
 /** @type {"a" | "b" | null} */
 let dragTargetPane = null;
 let dragScoreTimer = 0;
@@ -159,30 +169,31 @@ function applyPaneZoom(id) {
 
 function fitPaneZoom(id) {
   const p = panes[id];
-  if (!p.result || !p.result.width) {
+  if (!p.canvas.width) {
     p.zoom = 1;
     applyPaneZoom(id);
     return;
   }
-  const availW = Math.max(40, p.wrap.clientWidth - 24);
-  const availH = Math.max(40, p.wrap.clientHeight - 24);
-  const sx = availW / p.result.width;
-  const sy = availH / p.result.height;
-  p.zoom = Math.min(1.25, Math.max(0.12, Math.min(sx, sy) * 0.92));
+  const availW = Math.max(40, p.wrap.clientWidth - 16);
+  const availH = Math.max(40, p.wrap.clientHeight - 16);
+  const sx = availW / p.canvas.width;
+  const sy = availH / p.canvas.height;
+  // Prefer fitting the padded workspace; allow slight zoom-out so margins stay usable
+  p.zoom = Math.min(1.15, Math.max(0.08, Math.min(sx, sy) * 0.96));
   applyPaneZoom(id);
 }
 
 function focusZoomOnDrag(id) {
   const p = panes[id];
-  if (!p.result || !p.result.width) {
+  if (!p.canvas.width) {
     p.zoom = 1;
     applyPaneZoom(id);
     return;
   }
-  // Prefer larger tiles for matching: aim ~70% of wrap height for typical tile
+  // Zoom so roughly one tile fills most of the pane height, with pad still scrollable
   const tileH = tiles[0]?.height || 400;
-  const target = (p.wrap.clientHeight * 0.72) / tileH;
-  p.zoom = Math.min(1.4, Math.max(0.2, target));
+  const target = (p.wrap.clientHeight * 0.78) / tileH;
+  p.zoom = Math.min(1.5, Math.max(0.15, target));
   applyPaneZoom(id);
 }
 
@@ -236,15 +247,19 @@ function rebuildTiles() {
   updateThumbSize();
 }
 
-function showPreviewOnPane(id, canvas) {
+function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   const p = panes[id];
+  const pad = workspacePadFor(tiles, movingIndex);
+  const { canvas: padded, padX, padY } = padWorkspace(tightCanvas, pad.x, pad.y);
+  p.padX = padX;
+  p.padY = padY;
+  p.result = tightCanvas;
   const ctx = p.canvas.getContext("2d");
-  p.canvas.width = canvas.width;
-  p.canvas.height = canvas.height;
+  p.canvas.width = padded.width;
+  p.canvas.height = padded.height;
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
-  ctx.drawImage(canvas, 0, 0);
+  ctx.drawImage(padded, 0, 0);
   p.wrap.classList.add("has-result");
-  p.result = canvas;
   applyPaneZoom(id);
   updateButtons();
 }
@@ -255,6 +270,8 @@ function clearPanePreview(id) {
   p.canvas.height = 0;
   p.wrap.classList.remove("has-result");
   p.result = null;
+  p.padX = 0;
+  p.padY = 0;
   p.zoom = 1;
   applyPaneZoom(id);
 }
@@ -293,12 +310,12 @@ function refreshPane(id) {
         }
       }
       const { canvas } = compositeMontage(tiles, m, null);
-      showPreviewOnPane(id, canvas);
+      showPreviewOnPane(id, canvas, pending.movingIndex);
       return;
     }
     const abs = pending.abs;
     const { canvas } = compositeMontage(tiles, abs, pending.pending);
-    showPreviewOnPane(id, canvas);
+    showPreviewOnPane(id, canvas, pending.movingIndex);
     return;
   }
 
@@ -748,16 +765,22 @@ function paneAtPoint(clientX, clientY) {
   return null;
 }
 
-function prepareDragBase(paneId) {
+function prepareDragBase(paneId, movingIndex = -1) {
   const gid = groupForPane(paneId);
   if (!gid) {
     dragBaseCanvas = null;
+    dragCoreCanvas = null;
     dragBaseOrigin = null;
+    dragPad = { x: 0, y: 0 };
     return null;
   }
   const { canvas, origin } = compositeMontage(tiles, groups.get(gid), null);
-  dragBaseCanvas = canvas;
+  const pad = workspacePadFor(tiles, movingIndex);
+  const { canvas: padded, padX, padY } = padWorkspace(canvas, pad.x, pad.y);
+  dragCoreCanvas = canvas;
+  dragBaseCanvas = padded;
   dragBaseOrigin = origin;
+  dragPad = { x: padX, y: padY };
   return gid;
 }
 
@@ -773,27 +796,93 @@ function canvasPointerToLocal(p, clientX, clientY) {
   };
 }
 
+/**
+ * Grow padded workspace so the moving tile stays fully visible.
+ */
+function expandDragRoom(drawX, drawY, tw, th, wrap) {
+  const margin = 12;
+  const needL = Math.max(0, Math.ceil(margin - drawX));
+  const needT = Math.max(0, Math.ceil(margin - drawY));
+  const needR = Math.max(0, Math.ceil(drawX + tw + margin - dragBaseCanvas.width));
+  const needB = Math.max(0, Math.ceil(drawY + th + margin - dragBaseCanvas.height));
+  if (!needL && !needT && !needR && !needB) {
+    return { drawX, drawY };
+  }
+
+  const next = document.createElement("canvas");
+  next.width = dragBaseCanvas.width + needL + needR;
+  next.height = dragBaseCanvas.height + needT + needB;
+  const ctx = next.getContext("2d");
+  ctx.fillStyle = "#0a120e";
+  ctx.fillRect(0, 0, next.width, next.height);
+  ctx.drawImage(dragBaseCanvas, needL, needT);
+  dragBaseCanvas = next;
+  dragPad = { x: dragPad.x + needL, y: dragPad.y + needT };
+
+  if (wrap) {
+    const zoom = panes[dragTargetPane || focusedPane].zoom || 1;
+    wrap.scrollLeft += needL * zoom;
+    wrap.scrollTop += needT * zoom;
+  }
+
+  return { drawX: drawX + needL, drawY: drawY + needT };
+}
+
+function autoScrollWrap(wrap, clientX, clientY) {
+  const rect = wrap.getBoundingClientRect();
+  const edge = 56;
+  let dx = 0;
+  let dy = 0;
+  if (clientX < rect.left + edge) dx = -Math.ceil((edge - (clientX - rect.left)) / 3);
+  else if (clientX > rect.right - edge) dx = Math.ceil((edge - (rect.right - clientX)) / 3);
+  if (clientY < rect.top + edge) dy = -Math.ceil((edge - (clientY - rect.top)) / 3);
+  else if (clientY > rect.bottom - edge) dy = Math.ceil((edge - (rect.bottom - clientY)) / 3);
+  if (dx) wrap.scrollLeft += dx;
+  if (dy) wrap.scrollTop += dy;
+}
+
 function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
   const p = panes[paneId];
-  if (!dragBaseCanvas || !dragBaseOrigin) return false;
+  if (!dragBaseCanvas || !dragBaseOrigin || !dragCoreCanvas) return false;
+
+  autoScrollWrap(p.wrap, clientX, clientY);
+
   if (!p.canvas.width) {
-    showPreviewOnPane(paneId, dragBaseCanvas);
+    const ctx0 = p.canvas.getContext("2d");
+    p.canvas.width = dragBaseCanvas.width;
+    p.canvas.height = dragBaseCanvas.height;
+    ctx0.drawImage(dragBaseCanvas, 0, 0);
+    p.wrap.classList.add("has-result");
+    p.padX = dragPad.x;
+    p.padY = dragPad.y;
   }
 
   const mapped = canvasPointerToLocal(p, clientX, clientY);
   if (!mapped) return false;
-  const { localX, localY } = mapped;
-  const drawX = localX - tiles[movingIndex].width / 2;
-  const drawY = localY - tiles[movingIndex].height / 2;
+  let drawX = mapped.localX - tiles[movingIndex].width / 2;
+  let drawY = mapped.localY - tiles[movingIndex].height / 2;
+
+  const grown = expandDragRoom(
+    drawX,
+    drawY,
+    tiles[movingIndex].width,
+    tiles[movingIndex].height,
+    p.wrap
+  );
+  drawX = grown.drawX;
+  drawY = grown.drawY;
 
   const ctx = p.canvas.getContext("2d");
   p.canvas.width = dragBaseCanvas.width;
   p.canvas.height = dragBaseCanvas.height;
+  p.padX = dragPad.x;
+  p.padY = dragPad.y;
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(dragBaseCanvas, 0, 0);
 
+  // Agreement overlay is in core space — offset by pad
   if (agreementCanvas) {
-    ctx.drawImage(agreementCanvas, 0, 0);
+    ctx.drawImage(agreementCanvas, dragPad.x, dragPad.y);
   }
 
   ctx.save();
@@ -808,11 +897,14 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
 
   p.wrap.classList.add("has-result");
 
+  const coreX = drawX - dragPad.x;
+  const coreY = drawY - dragPad.y;
+
   const now = performance.now();
   if (now - dragScoreTimer < 120) return true;
   dragScoreTimer = now;
 
-  const score = scoreOverlapAt(dragBaseCanvas, tiles[movingIndex], drawX, drawY);
+  const score = scoreOverlapAt(dragCoreCanvas, tiles[movingIndex], coreX, coreY);
   const weakArea = score.area < 24 * 24;
   setLiveConf(score.score, weakArea);
   setStatus(
@@ -824,10 +916,10 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
 
   if (!weakArea && score.score > 0.35) {
     agreementCanvas = paintAgreementOverlay(
-      dragBaseCanvas,
+      dragCoreCanvas,
       tiles[movingIndex],
-      drawX,
-      drawY,
+      coreX,
+      coreY,
       agreementCanvas || undefined
     );
   } else {
@@ -841,7 +933,9 @@ function clearMontageDragPreview() {
   hideLiveConf();
   agreementCanvas = null;
   dragBaseCanvas = null;
+  dragCoreCanvas = null;
   dragBaseOrigin = null;
+  dragPad = { x: 0, y: 0 };
   dragScoreTimer = 0;
   dragTargetPane = null;
   for (const p of Object.values(panes)) p.el.classList.remove("drop-hot");
@@ -911,7 +1005,7 @@ function startDrag(e, index) {
       if (dragTargetPane !== overPane) {
         dragTargetPane = overPane;
         setFocusedPane(overPane);
-        prepareDragBase(overPane);
+        prepareDragBase(overPane, index);
         focusZoomOnDrag(overPane);
       }
 
@@ -1093,19 +1187,18 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
     const { canvas: montageCanvas, origin } = compositeMontage(tiles, abs, null);
 
     const p = panes[paneId];
-    // Prefer live canvas rect if available (accounts for zoom)
+    // Prefer live canvas rect if available (accounts for zoom + workspace pad)
     const liveRect = p.canvas.width ? p.canvas.getBoundingClientRect() : rect;
-    const scaleX = (p.canvas.width || montageCanvas.width) / Math.max(1, liveRect.width);
-    const scaleY = (p.canvas.height || montageCanvas.height) / Math.max(1, liveRect.height);
-    const localX = (clientX - liveRect.left) * scaleX;
-    const localY = (clientY - liveRect.top) * scaleY;
-
-    const guessDx = origin.minX + localX - tiles[movingIndex].width / 2;
-    const guessDy = origin.minY + localY - tiles[movingIndex].height / 2;
+    const padX = dragPad.x || p.padX || 0;
+    const padY = dragPad.y || p.padY || 0;
+    const scaleX = (p.canvas.width || montageCanvas.width + padX * 2) / Math.max(1, liveRect.width);
+    const scaleY = (p.canvas.height || montageCanvas.height + padY * 2) / Math.max(1, liveRect.height);
+    const localX = (clientX - liveRect.left) * scaleX - padX;
+    const localY = (clientY - liveRect.top) * scaleY - padY;
 
     const guessInMontage = {
-      dx: guessDx - origin.minX,
-      dy: guessDy - origin.minY,
+      dx: localX - tiles[movingIndex].width / 2,
+      dy: localY - tiles[movingIndex].height / 2,
     };
 
     const hit = snapNearOffset(
@@ -1208,33 +1301,113 @@ function updateCropPreview() {
   cropPreview.hidden = false;
 }
 
+function bytesToHex(buf) {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Exact pixel fingerprint (dimensions + SHA-256 of RGBA buffer).
+ * @param {HTMLImageElement} img
+ */
+async function pixelFingerprint(img) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return `${w}x${h}:${bytesToHex(digest)}`;
+}
+
 async function addFiles(files) {
   const list = [...files].filter((f) => f.type.startsWith("image/"));
   if (!list.length) {
     setStatus("No image files found.", "error");
     return;
   }
+
+  let skippedNameSize = 0;
+  let skippedPixels = 0;
+  let added = 0;
+  /** @type {Set<string>} */
+  const seenNameSize = new Set(loaded.map((l) => `${l.file.name}\0${l.file.size}`));
+  /** @type {Set<string>} */
+  const batchFingerprints = new Set();
+  for (const item of loaded) {
+    if (!item.fingerprint) {
+      item.fingerprint = await pixelFingerprint(item.img);
+    }
+    batchFingerprints.add(item.fingerprint);
+  }
+
   for (const file of list) {
+    const nameSizeKey = `${file.name}\0${file.size}`;
+    if (seenNameSize.has(nameSizeKey)) {
+      skippedNameSize += 1;
+      continue;
+    }
+
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.decoding = "async";
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = () => reject(new Error(`Failed to load ${file.name}`));
-      img.src = url;
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error(`Failed to load ${file.name}`));
+        img.src = url;
+      });
+    } catch (_) {
+      URL.revokeObjectURL(url);
+      setStatus(`Failed to load ${file.name}.`, "error");
+      continue;
+    }
+
+    const fingerprint = await pixelFingerprint(img);
+    if (batchFingerprints.has(fingerprint)) {
+      skippedPixels += 1;
+      URL.revokeObjectURL(url);
+      continue;
+    }
+
+    seenNameSize.add(nameSizeKey);
+    batchFingerprints.add(fingerprint);
+
     loaded.push({
       id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 7)}`,
       file,
       url,
       img,
+      fingerprint,
     });
+    added += 1;
   }
+
+  if (!added) {
+    const parts = [];
+    if (skippedNameSize) parts.push(`${skippedNameSize} same name+size`);
+    if (skippedPixels) parts.push(`${skippedPixels} identical pixels`);
+    setStatus(
+      parts.length ? `No new photos — skipped ${parts.join(", ")}.` : "No image files found.",
+      "error"
+    );
+    return;
+  }
+
   rebuildTiles();
   updateCropPreview();
   updateCounts();
   updateButtons();
-  setStatus("Click two overlapping shots, or drag a free tile onto a workspace.");
+  const skipBits = [];
+  if (skippedNameSize) skipBits.push(`${skippedNameSize} name+size`);
+  if (skippedPixels) skipBits.push(`${skippedPixels} pixel-identical`);
+  setStatus(
+    skipBits.length
+      ? `Added ${added}. Skipped duplicates (${skipBits.join(", ")}).`
+      : "Click two overlapping shots, or drag a free tile onto a workspace."
+  );
 }
 
 function clearAll() {

@@ -53,8 +53,8 @@ body {
   height: 100vh;
   height: 100dvh;
   max-width: 100%;
-  padding: 0.75rem 0.75rem 0.5rem;
-  gap: 0.5rem;
+  padding: 0.45rem 0.55rem 0.35rem;
+  gap: 0.35rem;
 }
 
 .top {
@@ -62,25 +62,25 @@ body {
   flex-wrap: wrap;
   align-items: end;
   justify-content: space-between;
-  gap: 0.75rem 1.5rem;
-  padding: 0.25rem 0.35rem 0.65rem;
+  gap: 0.45rem 1rem;
+  padding: 0.1rem 0.25rem 0.4rem;
   border-bottom: 1px solid var(--line);
 }
 
 .brand {
   margin: 0;
   font-family: var(--display);
-  font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+  font-size: clamp(1.45rem, 2.8vw, 2.1rem);
   font-weight: 400;
   letter-spacing: -0.02em;
   line-height: 1;
 }
 
 .tag {
-  margin: 0.35rem 0 0;
-  max-width: 40rem;
+  margin: 0.2rem 0 0;
+  max-width: 42rem;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: 0.82rem;
 }
 
 .controls {
@@ -356,8 +356,8 @@ body.dragging-work .thumb {
 
 .work-column {
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
-  gap: 0.45rem;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 0.35rem;
   min-width: 0;
   min-height: 0;
 }
@@ -454,14 +454,14 @@ body.dragging-work .thumb {
 .panes {
   display: grid;
   grid-template-rows: 1fr 1fr;
-  gap: 0.55rem;
+  gap: 0.45rem;
   min-height: 0;
   height: 100%;
 }
 
 .work-pane {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   border-radius: var(--radius);
   border: 1px solid var(--line);
@@ -484,9 +484,9 @@ body.dragging-work .thumb {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0.35rem 0.7rem;
+  padding: 0.25rem 0.65rem;
   border-bottom: 1px solid var(--line);
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -501,7 +501,10 @@ body.dragging-work .thumb {
   position: relative;
   min-height: 0;
   overflow: auto;
-  background: rgba(10, 18, 14, 0.65);
+  background:
+    radial-gradient(circle at 1px 1px, rgba(196, 232, 106, 0.07) 1px, transparent 0),
+    rgba(10, 18, 14, 0.72);
+  background-size: 18px 18px, auto;
 }
 
 .preview-stage {
@@ -511,7 +514,7 @@ body.dragging-work .thumb {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: 0.5rem;
+  padding: 1.25rem;
 }
 
 .preview-stage canvas {

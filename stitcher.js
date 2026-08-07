@@ -739,3 +739,53 @@ export function compositeMontage(tiles, abs, pending = null) {
 
   return { canvas, placed, pendingRect, origin: { minX, minY } };
 }
+
+/**
+ * Surround a tight montage with empty room so tiles can be dragged fully around edges.
+ * @param {HTMLCanvasElement} tight
+ * @param {number} padX
+ * @param {number} padY
+ */
+export function padWorkspace(tight, padX, padY) {
+  const px = Math.max(0, Math.ceil(padX));
+  const py = Math.max(0, Math.ceil(padY));
+  if (!px && !py) {
+    return { canvas: tight, padX: 0, padY: 0 };
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, tight.width + px * 2);
+  canvas.height = Math.max(1, tight.height + py * 2);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#0a120e";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Subtle frame for the content bounds
+  ctx.strokeStyle = "rgba(196, 232, 106, 0.18)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px - 0.5, py - 0.5, tight.width + 1, tight.height + 1);
+  ctx.drawImage(tight, px, py);
+  return { canvas, padX: px, padY: py };
+}
+
+/**
+ * Pad size so a full tile can sit entirely outside each edge of the montage.
+ * @param {{ width: number, height: number }[]} tiles
+ * @param {number} [movingIndex]
+ */
+export function workspacePadFor(tiles, movingIndex = -1) {
+  let maxW = 320;
+  let maxH = 320;
+  for (const t of tiles) {
+    if (!t) continue;
+    maxW = Math.max(maxW, t.width);
+    maxH = Math.max(maxH, t.height);
+  }
+  if (movingIndex >= 0 && tiles[movingIndex]) {
+    maxW = Math.max(maxW, tiles[movingIndex].width);
+    maxH = Math.max(maxH, tiles[movingIndex].height);
+  }
+  // Full tile + slack so neighbors can be dragged around each other without clipping
+  return {
+    x: Math.ceil(maxW * 1.15),
+    y: Math.ceil(maxH * 1.15),
+  };
+}
