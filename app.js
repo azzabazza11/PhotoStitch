@@ -8,7 +8,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=10";
+} from "./stitcher.js?v=12";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -32,10 +32,6 @@ const thresholdOut = document.getElementById("thresholdOut");
 const scaleSelect = document.getElementById("scale");
 const cropPreview = document.getElementById("cropPreview");
 const cropCanvas = document.getElementById("cropCanvas");
-const reviewBar = document.getElementById("reviewBar");
-const reviewMsg = document.getElementById("reviewMsg");
-const acceptBtn = document.getElementById("acceptBtn");
-const rejectBtn = document.getElementById("rejectBtn");
 const dragGhost = document.getElementById("dragGhost");
 const liveConf = document.getElementById("liveConf");
 const liveConfFill = document.getElementById("liveConfFill");
@@ -56,6 +52,8 @@ const panes = {
     result: null,
     padX: 0,
     padY: 0,
+    /** Once true, never auto-fit — only wheel zoom changes scale */
+    userZoomed: false,
   },
   b: {
     id: "b",
@@ -71,6 +69,7 @@ const panes = {
     result: null,
     padX: 0,
     padY: 0,
+    userZoomed: false,
   },
 };
 
@@ -85,13 +84,9 @@ function setWorkspaceBVisible(on) {
   workspace2Btn.setAttribute("aria-pressed", workspaceBVisible ? "true" : "false");
   workspace2Btn.textContent = workspaceBVisible ? "Hide B" : "+ Workspace";
   if (!workspaceBVisible && focusedPane === "b") {
-    setFocusedPane("a", { fit: true });
-  } else if (workspaceBVisible) {
-    fitPaneZoom("a");
-    fitPaneZoom("b");
-  } else {
-    fitPaneZoom("a");
+    setFocusedPane("a");
   }
+  // Do not auto-fit zoom — keep the user's scale
 }
 
 function toggleWorkspaceB() {
@@ -126,23 +121,6 @@ let selection = [];
 /** Locked tile ids — cannot be re-dragged until Unlock */
 /** @type {Set<string>} */
 let lockedIds = new Set();
-
-/**
- * @type {null | {
- *   movingIndex: number,
- *   abs: Map<number, { dx: number, dy: number }>,
- *   pending: { index: number, dx: number, dy: number },
- *   score: number,
- *   edge: string,
- *   weak?: boolean,
- *   targetGroupId: string | null,
- *   mergeGroupId: string | null,
- *   mergeDelta?: { dx: number, dy: number },
- *   paneId: "a" | "b",
- *   realign?: boolean,
- * }}
- */
-let pending = null;
 
 let busy = false;
 
@@ -197,7 +175,8 @@ function setFocusedPane(id, { fit = false } = {}) {
   for (const p of Object.values(panes)) {
     p.el.classList.toggle("focused", p.id === id);
   }
-  if (fit) fitPaneZoom(id);
+  // Only fit when explicitly requested and user hasn't scroll-zoomed this pane
+  if (fit && !panes[id].userZoomed) fitPaneZoom(id);
   updateButtons();
 }
 
@@ -207,8 +186,13 @@ function applyPaneZoom(id) {
   p.zoomEl.textContent = `${Math.round(p.zoom * 100)}%`;
 }
 
+/** Fit once for empty→first content only; never overrides user scroll-zoom. */
 function fitPaneZoom(id) {
   const p = panes[id];
+  if (p.userZoomed) {
+    applyPaneZoom(id);
+    return;
+  }
   if (!p.canvas.width) {
     p.zoom = 1;
     applyPaneZoom(id);
@@ -218,22 +202,7 @@ function fitPaneZoom(id) {
   const availH = Math.max(40, p.wrap.clientHeight - 16);
   const sx = availW / p.canvas.width;
   const sy = availH / p.canvas.height;
-  // Prefer fitting the padded workspace; allow slight zoom-out so margins stay usable
   p.zoom = Math.min(1.15, Math.max(0.08, Math.min(sx, sy) * 0.96));
-  applyPaneZoom(id);
-}
-
-function focusZoomOnDrag(id) {
-  const p = panes[id];
-  if (!p.canvas.width) {
-    p.zoom = 1;
-    applyPaneZoom(id);
-    return;
-  }
-  // Zoom so roughly one tile fills most of the pane height, with pad still scrollable
-  const tileH = tiles[0]?.height || 400;
-  const target = (p.wrap.clientHeight * 0.78) / tileH;
-  p.zoom = Math.min(1.5, Math.max(0.15, target));
   applyPaneZoom(id);
 }
 
@@ -248,10 +217,10 @@ function updateButtons() {
   const lockedSel = selection.filter((id) => lockedIds.has(id));
   const unlockedPlaced = placedSel.filter((i) => !lockedIds.has(tiles[i].id));
 
-  matchBtn.disabled = busy || Boolean(pending) || selection.length !== 2;
-  lockBtn.disabled = busy || Boolean(pending) || unlockedPlaced.length === 0;
-  unlockBtn.disabled = busy || Boolean(pending) || lockedSel.length === 0;
-  returnBtn.disabled = busy || Boolean(pending) || placedSel.length === 0;
+  matchBtn.disabled = busy || selection.length !== 2;
+  lockBtn.disabled = busy || unlockedPlaced.length === 0;
+  unlockBtn.disabled = busy || lockedSel.length === 0;
+  returnBtn.disabled = busy || placedSel.length === 0;
 }
 
 function updateCounts() {
@@ -295,10 +264,11 @@ function rebuildTiles() {
   nextGroup = 1;
   panes.a.groupId = null;
   panes.b.groupId = null;
-  pending = null;
   history = [];
   selection = [];
   lockedIds = new Set();
+  panes.a.userZoomed = false;
+  panes.b.userZoomed = false;
   refreshAllPreviews();
   renderThumbs();
   updateThumbSize();
@@ -306,6 +276,7 @@ function rebuildTiles() {
 
 function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   const p = panes[id];
+  const hadContent = Boolean(p.result);
   const pad = workspacePadFor(tiles, movingIndex);
   const { canvas: padded, padX, padY } = padWorkspace(tightCanvas, pad.x, pad.y);
   p.padX = padX;
@@ -317,7 +288,9 @@ function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(padded, 0, 0);
   p.wrap.classList.add("has-result");
-  applyPaneZoom(id);
+  // Keep current zoom; only auto-fit the first time content appears
+  if (!hadContent && !p.userZoomed) fitPaneZoom(id);
+  else applyPaneZoom(id);
   updateButtons();
 }
 
@@ -330,6 +303,7 @@ function clearPanePreview(id) {
   p.padX = 0;
   p.padY = 0;
   p.zoom = 1;
+  p.userZoomed = false;
   applyPaneZoom(id);
 }
 
@@ -352,29 +326,7 @@ function groupForPane(id) {
 }
 
 function refreshPane(id) {
-  const p = panes[id];
-  let gid = groupForPane(id);
-
-  // Pending preview belongs on the pane that owns the proposal
-  if (pending && pending.paneId === id) {
-    if (pending.mergeGroupId && pending.targetGroupId) {
-      const m = new Map(groups.get(pending.targetGroupId) || []);
-      const other = groups.get(pending.mergeGroupId);
-      const delta = pending.mergeDelta;
-      if (other && delta) {
-        for (const [ti, pos] of other) {
-          m.set(ti, { dx: pos.dx + delta.dx, dy: pos.dy + delta.dy });
-        }
-      }
-      const { canvas } = compositeMontage(tiles, m, null);
-      showPreviewOnPane(id, canvas, pending.movingIndex);
-      return;
-    }
-    const abs = pending.abs;
-    const { canvas } = compositeMontage(tiles, abs, pending.pending);
-    showPreviewOnPane(id, canvas, pending.movingIndex);
-    return;
-  }
+  const gid = groupForPane(id);
 
   if (!gid) {
     clearPanePreview(id);
@@ -390,20 +342,6 @@ function refreshPane(id) {
 function refreshAllPreviews() {
   refreshPane("a");
   refreshPane("b");
-  // Fit empty-ish panes once; keep user zoom on focused if they already zoomed
-  for (const id of /** @type {const} */ (["a", "b"])) {
-    if (panes[id].result) fitPaneZoom(id);
-  }
-}
-
-function hideReview() {
-  reviewBar.hidden = true;
-}
-
-function showReview(msg) {
-  reviewMsg.textContent = msg;
-  reviewBar.hidden = false;
-  acceptBtn.focus();
 }
 
 function renderThumbs() {
@@ -424,7 +362,6 @@ function renderThumbs() {
       wrap.dataset.group = gid;
     }
     if (lockedIds.has(item.id)) wrap.classList.add("locked");
-    if (pending && pending.movingIndex === idx) wrap.classList.add("pending");
 
     const img = document.createElement("img");
     img.className = "thumb";
@@ -434,8 +371,7 @@ function renderThumbs() {
 
     const meta = document.createElement("span");
     meta.className = "thumb-meta";
-    if (pending && pending.movingIndex === idx) meta.textContent = "review";
-    else if (lockedIds.has(item.id)) meta.textContent = gid ? `${gid} · locked` : "locked";
+    if (lockedIds.has(item.id)) meta.textContent = gid ? `${gid} · locked` : "locked";
     else if (gid) meta.textContent = gid;
     else if (selection.includes(item.id)) {
       const n = selection.indexOf(item.id) + 1;
@@ -479,10 +415,6 @@ function renderThumbs() {
 
 function onThumbClick(id, e = null) {
   if (busy) return;
-  if (pending) {
-    setStatus("Accept or Reject the current proposal first.", "error");
-    return;
-  }
 
   const multi = e && (e.ctrlKey || e.metaKey);
 
@@ -540,7 +472,7 @@ async function runPairMatch(idA, idB) {
     await yieldUi();
     const hit = matchTwoTiles(tiles[iA], tiles[iB], opts());
     if (!hit) {
-      setStatus("No confident match for that pair — try drag-snap or lower confidence.", "error");
+      setStatus("No confident match — try drag-snap or lower confidence.", "error");
       selection = [];
       renderThumbs();
       return;
@@ -549,114 +481,72 @@ async function runPairMatch(idA, idB) {
     const gA = tileGroup.get(iA);
     const gB = tileGroup.get(iB);
 
-    /** @type {Map<number, { dx: number, dy: number }>} */
-    let abs;
-    /** @type {string | null} */
-    let targetGroupId = null;
-    /** @type {string | null} */
-    let mergeGroupId = null;
-    let movingIndex;
-    let pendingPos;
-
     if (!gA && !gB) {
-      abs = new Map([[iA, { dx: 0, dy: 0 }]]);
-      movingIndex = iB;
-      pendingPos = { index: iB, dx: hit.dx, dy: hit.dy };
-      targetGroupId = null;
-    } else if (gA && !gB) {
-      abs = new Map(groups.get(gA));
-      const aPos = abs.get(iA);
-      movingIndex = iB;
-      pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
-      targetGroupId = gA;
-    } else if (!gA && gB) {
-      abs = new Map(groups.get(gB));
-      const bPos = abs.get(iB);
-      movingIndex = iA;
-      pendingPos = { index: iA, dx: bPos.dx - hit.dx, dy: bPos.dy - hit.dy };
-      targetGroupId = gB;
-    } else if (gA && gB && gA !== gB) {
-      abs = new Map(groups.get(gA));
-      const aPos = abs.get(iA);
-      const bAbs = groups.get(gB);
-      const bPos = bAbs.get(iB);
-      const deltaX = aPos.dx + hit.dx - bPos.dx;
-      const deltaY = aPos.dy + hit.dy - bPos.dy;
-      movingIndex = iB;
-      pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
-      targetGroupId = gA;
-      mergeGroupId = gB;
-      pending = {
-        movingIndex,
-        abs: new Map(groups.get(gA)),
-        pending: pendingPos,
+      applyJoin({
+        paneId,
+        targetGroupId: null,
+        abs: new Map([[iA, { dx: 0, dy: 0 }]]),
+        place: { index: iB, dx: hit.dx, dy: hit.dy },
         score: hit.score,
         edge: hit.edge,
-        targetGroupId,
-        mergeGroupId,
-        mergeDelta: { dx: deltaX, dy: deltaY },
-        paneId,
-      };
-      selection = [];
-      panes[paneId].groupId = gA;
-      refreshAllPreviews();
-      fitPaneZoom(paneId);
-      showReview(`Merge ${gB} → ${gA}? score ${hit.score.toFixed(3)} · ${hit.edge}`);
-      setStatus(`Merge groups via ${tiles[iA].name} + ${tiles[iB].name}`, "busy");
-      renderThumbs();
-      return;
-    } else if (gA && gB && gA === gB) {
-      // Same group: realign second tile relative to first
-      abs = new Map(groups.get(gA));
-      abs.delete(iB);
-      const aPos = groups.get(gA).get(iA);
-      movingIndex = iB;
-      pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
-      targetGroupId = gA;
-      pending = {
-        movingIndex,
-        abs,
-        pending: pendingPos,
-        score: hit.score,
-        edge: hit.edge,
-        targetGroupId,
-        mergeGroupId: null,
-        paneId,
-        realign: true,
-      };
-      selection = [];
-      panes[paneId].groupId = gA;
-      refreshAllPreviews();
-      fitPaneZoom(paneId);
-      showReview(
-        `Re-fit “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}`
-      );
-      setStatus("Accept to update alignment, Reject to keep the old position, or drag again.", "busy");
-      renderThumbs();
-      return;
-    } else {
-      setStatus("Could not join that pair.", "error");
-      selection = [];
-      renderThumbs();
+      });
       return;
     }
-
-    pending = {
-      movingIndex,
-      abs,
-      pending: pendingPos,
-      score: hit.score,
-      edge: hit.edge,
-      targetGroupId,
-      mergeGroupId: null,
-      paneId,
-    };
+    if (gA && !gB) {
+      const abs = new Map(groups.get(gA));
+      const aPos = abs.get(iA);
+      applyJoin({
+        paneId,
+        targetGroupId: gA,
+        place: { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy },
+        score: hit.score,
+        edge: hit.edge,
+      });
+      return;
+    }
+    if (!gA && gB) {
+      const abs = new Map(groups.get(gB));
+      const bPos = abs.get(iB);
+      applyJoin({
+        paneId,
+        targetGroupId: gB,
+        place: { index: iA, dx: bPos.dx - hit.dx, dy: bPos.dy - hit.dy },
+        score: hit.score,
+        edge: hit.edge,
+      });
+      return;
+    }
+    if (gA && gB && gA !== gB) {
+      const aPos = groups.get(gA).get(iA);
+      const bPos = groups.get(gB).get(iB);
+      applyJoin({
+        paneId,
+        targetGroupId: gA,
+        mergeGroupId: gB,
+        mergeDelta: {
+          dx: aPos.dx + hit.dx - bPos.dx,
+          dy: aPos.dy + hit.dy - bPos.dy,
+        },
+        score: hit.score,
+        edge: hit.edge,
+        message: `Merged ${gB} → ${gA} (${hit.score.toFixed(3)} · ${hit.edge}).`,
+      });
+      return;
+    }
+    if (gA && gB && gA === gB) {
+      const aPos = groups.get(gA).get(iA);
+      applyJoin({
+        paneId,
+        targetGroupId: gA,
+        place: { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy },
+        score: hit.score,
+        edge: hit.edge,
+        realign: true,
+      });
+      return;
+    }
+    setStatus("Could not join that pair.", "error");
     selection = [];
-    if (targetGroupId) panes[paneId].groupId = targetGroupId;
-    refreshAllPreviews();
-    fitPaneZoom(paneId);
-    showReview(`Join “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}`);
-    setStatus("Accept to lock this join, or Reject to try another pair.", "busy");
     renderThumbs();
   } finally {
     busy = false;
@@ -664,65 +554,70 @@ async function runPairMatch(idA, idB) {
   }
 }
 
-function acceptPending() {
-  if (!pending) return;
-  pushHistory();
-  const p = pending;
-  const paneId = p.paneId || focusedPane;
+/**
+ * Commit a join/snap/merge immediately (no Accept/Reject).
+ * @param {{
+ *   paneId: "a"|"b",
+ *   targetGroupId: string|null,
+ *   place?: { index: number, dx: number, dy: number },
+ *   abs?: Map<number, {dx:number,dy:number}>,
+ *   mergeGroupId?: string|null,
+ *   mergeDelta?: { dx: number, dy: number },
+ *   score?: number,
+ *   edge?: string,
+ *   realign?: boolean,
+ *   message?: string,
+ * }} spec
+ */
+function applyJoin(spec) {
+  if (!spec.skipHistory) pushHistory();
+  const paneId = spec.paneId || focusedPane;
 
-  if (p.mergeGroupId && p.targetGroupId) {
-    const target = groups.get(p.targetGroupId);
-    const other = groups.get(p.mergeGroupId);
-    const delta = p.mergeDelta;
+  if (spec.mergeGroupId && spec.targetGroupId) {
+    const target = groups.get(spec.targetGroupId);
+    const other = groups.get(spec.mergeGroupId);
+    const delta = spec.mergeDelta;
     for (const [ti, pos] of other) {
       target.set(ti, { dx: pos.dx + delta.dx, dy: pos.dy + delta.dy });
-      tileGroup.set(ti, p.targetGroupId);
+      tileGroup.set(ti, spec.targetGroupId);
     }
-    groups.delete(p.mergeGroupId);
+    groups.delete(spec.mergeGroupId);
     for (const pan of Object.values(panes)) {
-      if (pan.groupId === p.mergeGroupId) pan.groupId = p.targetGroupId;
+      if (pan.groupId === spec.mergeGroupId) pan.groupId = spec.targetGroupId;
     }
-    panes[paneId].groupId = p.targetGroupId;
-  } else if (!p.targetGroupId) {
+    panes[paneId].groupId = spec.targetGroupId;
+  } else if (!spec.targetGroupId && spec.abs && spec.place) {
     const gid = `G${nextGroup++}`;
-    const abs = new Map(p.abs);
-    abs.set(p.pending.index, { dx: p.pending.dx, dy: p.pending.dy });
+    const abs = new Map(spec.abs);
+    abs.set(spec.place.index, { dx: spec.place.dx, dy: spec.place.dy });
     groups.set(gid, abs);
     for (const ti of abs.keys()) tileGroup.set(ti, gid);
     panes[paneId].groupId = gid;
-  } else {
-    const abs = groups.get(p.targetGroupId);
-    abs.set(p.pending.index, { dx: p.pending.dx, dy: p.pending.dy });
-    tileGroup.set(p.pending.index, p.targetGroupId);
-    panes[paneId].groupId = p.targetGroupId;
+  } else if (spec.targetGroupId && spec.place) {
+    const abs = groups.get(spec.targetGroupId);
+    abs.set(spec.place.index, { dx: spec.place.dx, dy: spec.place.dy });
+    tileGroup.set(spec.place.index, spec.targetGroupId);
+    panes[paneId].groupId = spec.targetGroupId;
   }
 
-  pending = null;
-  hideReview();
+  selection = spec.place ? [tiles[spec.place.index].id] : [];
   refreshAllPreviews();
-  fitPaneZoom(paneId);
   renderThumbs();
   updateCounts();
   updateButtons();
+
+  const scoreBit =
+    spec.score != null ? ` ${spec.score.toFixed(3)}${spec.edge ? ` · ${spec.edge}` : ""}` : "";
   setStatus(
-    p.realign
-      ? `Re-fit saved. Lock selected tiles when the alignment looks right.`
-      : `Joined. ${tileGroup.size} tiles placed. Re-drag unlocked tiles to refine, then Lock.`
+    spec.message ||
+      (spec.realign
+        ? `Re-fit applied.${scoreBit} Drag again to refine, or Lock when ready.`
+        : `Joined.${scoreBit} Re-drag to refine, Lock when ready.`)
   );
 }
 
-function rejectPending() {
-  if (!pending) return;
-  pending = null;
-  hideReview();
-  selection = [];
-  refreshAllPreviews();
-  renderThumbs();
-  setStatus("Rejected. Re-drag to try another fit, or pick another pair.");
-}
-
 function lockSelected() {
-  if (busy || pending) return;
+  if (busy) return;
   const ids = selection.filter((id) => {
     const i = indexById(id);
     return i >= 0 && tileGroup.has(i);
@@ -736,11 +631,11 @@ function lockSelected() {
   renderThumbs();
   updateButtons();
   updateCounts();
-  setStatus(`Locked ${ids.length} tile${ids.length === 1 ? "" : "s"} together — Unlock to move again.`);
+  setStatus(`Locked ${ids.length} tile${ids.length === 1 ? "" : "s"} — Unlock to move again.`);
 }
 
 function unlockSelected() {
-  if (busy || pending) return;
+  if (busy) return;
   const ids = selection.filter((id) => lockedIds.has(id));
   if (!ids.length) {
     setStatus("Select locked tiles to unlock.", "error");
@@ -755,7 +650,7 @@ function unlockSelected() {
 }
 
 function returnSelectedToRail() {
-  if (busy || pending) return;
+  if (busy) return;
   const ids = selection.filter((id) => {
     const i = indexById(id);
     return i >= 0 && tileGroup.has(i);
@@ -796,10 +691,7 @@ function unplaceByIds(ids, { recordHistory = true } = {}) {
 }
 
 function removeSelectedPhotos() {
-  if (busy || pending) {
-    setStatus("Accept or Reject the current proposal first.", "error");
-    return;
-  }
+  if (busy) return;
   if (!selection.length) return;
   const ids = [...selection];
   pushHistory();
@@ -881,10 +773,6 @@ function pushHistory() {
 
 function undoLast() {
   if (!history.length || busy) return;
-  if (pending) {
-    pending = null;
-    hideReview();
-  }
   const snap = history.pop();
   nextGroup = snap.nextGroup;
   panes.a.groupId = snap.paneGroups.a;
@@ -906,9 +794,6 @@ function undoLast() {
   );
 }
 
-acceptBtn.addEventListener("click", acceptPending);
-rejectBtn.addEventListener("click", rejectPending);
-
 window.addEventListener("keydown", (e) => {
   if (e.target && ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
   const key = e.key.toLowerCase();
@@ -921,16 +806,6 @@ window.addEventListener("keydown", (e) => {
     if (selection.length) {
       e.preventDefault();
       removeSelectedPhotos();
-    }
-    return;
-  }
-  if (pending) {
-    if (key === "a") {
-      e.preventDefault();
-      acceptPending();
-    } else if (key === "r") {
-      e.preventDefault();
-      rejectPending();
     }
     return;
   }
@@ -949,12 +824,6 @@ function reorderThumbs(fromId, beforeId) {
   if (from < 0) return false;
 
   const placements = snapshotPlacementsById();
-  const pendingMovingId = pending ? tiles[pending.movingIndex].id : null;
-  const pendingAbsIds = pending
-    ? [...pending.abs.entries()].map(([i, pos]) => [tiles[i].id, pos])
-    : null;
-  const pendingPosId = pending ? tiles[pending.pending.index].id : null;
-  const pendingPos = pending ? { ...pending.pending } : null;
 
   const next = [...loaded];
   const [moved] = next.splice(from, 1);
@@ -965,25 +834,6 @@ function reorderThumbs(fromId, beforeId) {
   tiles = loaded.map((l) => tiles.find((t) => t.id === l.id));
 
   restorePlacementsById(placements);
-
-  if (pending && pendingMovingId && pendingAbsIds && pendingPosId) {
-    const abs = new Map();
-    for (const [id, pos] of pendingAbsIds) {
-      const idx = indexById(id);
-      if (idx >= 0) abs.set(idx, pos);
-    }
-    pending = {
-      ...pending,
-      movingIndex: indexById(pendingMovingId),
-      abs,
-      pending: {
-        index: indexById(pendingPosId),
-        dx: pendingPos.dx,
-        dy: pendingPos.dy,
-      },
-    };
-  }
-
   return true;
 }
 
@@ -1077,35 +927,6 @@ function canvasPointerToLocal(p, clientX, clientY) {
 /**
  * Grow padded workspace so the moving tile stays fully visible.
  */
-function expandDragRoom(drawX, drawY, tw, th, wrap) {
-  const margin = 12;
-  const needL = Math.max(0, Math.ceil(margin - drawX));
-  const needT = Math.max(0, Math.ceil(margin - drawY));
-  const needR = Math.max(0, Math.ceil(drawX + tw + margin - dragBaseCanvas.width));
-  const needB = Math.max(0, Math.ceil(drawY + th + margin - dragBaseCanvas.height));
-  if (!needL && !needT && !needR && !needB) {
-    return { drawX, drawY };
-  }
-
-  const next = document.createElement("canvas");
-  next.width = dragBaseCanvas.width + needL + needR;
-  next.height = dragBaseCanvas.height + needT + needB;
-  const ctx = next.getContext("2d");
-  ctx.fillStyle = "#0a120e";
-  ctx.fillRect(0, 0, next.width, next.height);
-  ctx.drawImage(dragBaseCanvas, needL, needT);
-  dragBaseCanvas = next;
-  dragPad = { x: dragPad.x + needL, y: dragPad.y + needT };
-
-  if (wrap) {
-    const zoom = panes[dragTargetPane || focusedPane].zoom || 1;
-    wrap.scrollLeft += needL * zoom;
-    wrap.scrollTop += needT * zoom;
-  }
-
-  return { drawX: drawX + needL, drawY: drawY + needT };
-}
-
 function autoScrollWrap(wrap, clientX, clientY) {
   const rect = wrap.getBoundingClientRect();
   const edge = 56;
@@ -1125,40 +946,25 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
 
   autoScrollWrap(p.wrap, clientX, clientY);
 
-  if (!p.canvas.width) {
-    const ctx0 = p.canvas.getContext("2d");
+  // Keep display canvas size locked to drag base — no mid-drag resize (avoids zoom/pan jumps)
+  if (p.canvas.width !== dragBaseCanvas.width || p.canvas.height !== dragBaseCanvas.height) {
     p.canvas.width = dragBaseCanvas.width;
     p.canvas.height = dragBaseCanvas.height;
-    ctx0.drawImage(dragBaseCanvas, 0, 0);
-    p.wrap.classList.add("has-result");
     p.padX = dragPad.x;
     p.padY = dragPad.y;
+    p.wrap.classList.add("has-result");
+    applyPaneZoom(paneId);
   }
 
   const mapped = canvasPointerToLocal(p, clientX, clientY);
   if (!mapped) return false;
-  let drawX = mapped.localX - tiles[movingIndex].width / 2;
-  let drawY = mapped.localY - tiles[movingIndex].height / 2;
-
-  const grown = expandDragRoom(
-    drawX,
-    drawY,
-    tiles[movingIndex].width,
-    tiles[movingIndex].height,
-    p.wrap
-  );
-  drawX = grown.drawX;
-  drawY = grown.drawY;
+  const drawX = mapped.localX - tiles[movingIndex].width / 2;
+  const drawY = mapped.localY - tiles[movingIndex].height / 2;
 
   const ctx = p.canvas.getContext("2d");
-  p.canvas.width = dragBaseCanvas.width;
-  p.canvas.height = dragBaseCanvas.height;
-  p.padX = dragPad.x;
-  p.padY = dragPad.y;
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(dragBaseCanvas, 0, 0);
 
-  // Agreement overlay is in core space — offset by pad
   if (agreementCanvas) {
     ctx.drawImage(agreementCanvas, dragPad.x, dragPad.y);
   }
@@ -1172,8 +978,6 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
   ctx.setLineDash([8, 5]);
   ctx.strokeRect(drawX + 1, drawY + 1, tiles[movingIndex].width - 2, tiles[movingIndex].height - 2);
   ctx.restore();
-
-  p.wrap.classList.add("has-result");
 
   const coreX = drawX - dragPad.x;
   const coreY = drawY - dragPad.y;
@@ -1265,11 +1069,7 @@ function startDrag(e, index, originEl = null) {
 
   const loadedIdx = loaded.findIndex((l) => l.id === fromId);
   let lastHover = null;
-  const canLiveSnap =
-    !lockedIds.has(fromId) &&
-    (!tileGroup.has(index) ||
-      (pending && pending.movingIndex === index) ||
-      tileGroup.has(index));
+  const canLiveSnap = !lockedIds.has(fromId);
 
   document.body.classList.add("dragging-work");
 
@@ -1293,7 +1093,7 @@ function startDrag(e, index, originEl = null) {
         dragTargetPane = overPane;
         setFocusedPane(overPane);
         prepareDragBase(overPane, index);
-        focusZoomOnDrag(overPane);
+        // Keep zoom as-is — do not auto-zoom on drag enter
       }
 
       if (dragBaseCanvas) {
@@ -1414,15 +1214,6 @@ function startDrag(e, index, originEl = null) {
 
     const overPane = paneAtPoint(ev.clientX, ev.clientY);
     if (overPane) {
-      if (pending && pending.movingIndex !== i) {
-        clearMontageDragPreview();
-        refreshAllPreviews();
-        setStatus("Accept or Reject the current proposal first.", "error");
-        setTimeout(() => {
-          dragMoved = false;
-        }, 0);
-        return;
-      }
       setFocusedPane(overPane);
       const rect = panes[overPane].canvas.getBoundingClientRect();
       finishDragSnap(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
@@ -1465,10 +1256,8 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0 }]]));
       tileGroup.set(movingIndex, newG);
       panes[paneId].groupId = newG;
-      pending = null;
-      hideReview();
+      selection = [tiles[movingIndex].id];
       refreshAllPreviews();
-      fitPaneZoom(paneId);
       renderThumbs();
       updateCounts();
       updateButtons();
@@ -1478,7 +1267,6 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       return;
     }
 
-    // Moving a tile from another group onto this pane: unplace first, then snap as free
     if (wasInGroup && wasInGroup !== gid) {
       pushHistory();
       unplaceByIds([tiles[movingIndex].id], { recordHistory: false });
@@ -1486,12 +1274,10 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
 
     const baseAbs = realigning ? absWithoutTile(gid, movingIndex) : new Map(groups.get(gid));
     if (!baseAbs.size) {
-      // Solo tile re-drop on its own empty group — keep at origin
-      pushHistory();
+      if (!(wasInGroup && wasInGroup !== gid)) pushHistory();
       groups.get(gid).set(movingIndex, { dx: 0, dy: 0 });
       tileGroup.set(movingIndex, gid);
-      pending = null;
-      hideReview();
+      selection = [tiles[movingIndex].id];
       refreshAllPreviews();
       renderThumbs();
       updateCounts();
@@ -1525,42 +1311,27 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
     );
 
     if (!hit) {
-      setStatus("Snap failed — try a closer drop, or click-pair Match.", "error");
+      setStatus("Snap failed — try a closer drop, or Match two thumbs.", "error");
       refreshAllPreviews();
       return;
     }
 
     const absDx = origin.minX + hit.dx;
     const absDy = origin.minY + hit.dy;
+    const alreadyHistoric = Boolean(wasInGroup && wasInGroup !== gid);
 
-    pending = {
-      movingIndex,
-      abs: baseAbs,
-      pending: { index: movingIndex, dx: absDx, dy: absDy },
+    applyJoin({
+      paneId,
+      targetGroupId: gid,
+      place: { index: movingIndex, dx: absDx, dy: absDy },
       score: hit.score,
       edge: hit.edge,
-      weak: !!hit.weak,
-      targetGroupId: gid,
-      mergeGroupId: null,
-      paneId,
       realign: realigning,
-    };
-    panes[paneId].groupId = gid;
-    selection = [tiles[movingIndex].id];
-    refreshAllPreviews();
-    fitPaneZoom(paneId);
-    const weakNote = hit.weak ? " (weak — nudge & re-drop if needed)" : "";
-    const label = realigning ? "Re-fit" : "Snap";
-    showReview(
-      `${label} “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}${weakNote}`
-    );
-    setStatus(
-      hit.weak
-        ? "Weak snap — Accept, Reject, or drag again for a better fit."
-        : `${label} ready. Accept to keep, or drag again for a second attempt.`,
-      "busy"
-    );
-    renderThumbs();
+      skipHistory: alreadyHistoric,
+      message: hit.weak
+        ? `Weak snap ${hit.score.toFixed(3)} · ${hit.edge} — drag again to refine.`
+        : `${realigning ? "Re-fit" : "Snapped"} ${hit.score.toFixed(3)} · ${hit.edge}. Drag again to refine, or Lock.`,
+    });
   } finally {
     busy = false;
     updateButtons();
@@ -1736,14 +1507,14 @@ function clearAll() {
   nextGroup = 1;
   panes.a.groupId = null;
   panes.b.groupId = null;
-  pending = null;
   history = [];
   selection = [];
   lockedIds = new Set();
+  panes.a.userZoomed = false;
+  panes.b.userZoomed = false;
   clearPanePreview("a");
   clearPanePreview("b");
   cropPreview.hidden = true;
-  hideReview();
   renderThumbs();
   updateThumbSize();
   updateCounts();
@@ -1811,6 +1582,7 @@ function bindPaneInteraction(paneId) {
       setFocusedPane(paneId);
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
       p.zoom = Math.min(3, Math.max(0.08, p.zoom * factor));
+      p.userZoomed = true;
       applyPaneZoom(paneId);
     },
     { passive: false }
@@ -1886,8 +1658,9 @@ returnBtn.addEventListener("click", returnSelectedToRail);
 workspace2Btn.addEventListener("click", toggleWorkspaceB);
 
 window.addEventListener("resize", () => {
+  // Preserve zoom/pan — only re-apply current scale after layout
   for (const id of /** @type {const} */ (["a", "b"])) {
-    if (panes[id].result) fitPaneZoom(id);
+    applyPaneZoom(id);
   }
 });
 
