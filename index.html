@@ -9,14 +9,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
 
   <header class="top">
     <p class="brand">PhotoStitch</p>
-    <p class="tag">Click two overlapping shots to match, or drag a tile onto the montage to snap. You choose every join.</p>
+    <p class="tag">Shuffle thumbs, click two to match, or drag onto the montage to snap. You choose every join.</p>
   </header>
 
   <main>
@@ -40,6 +40,7 @@
         </select>
       </label>
       <div class="actions">
+        <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
         <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
         <button type="button" id="downloadBtn" class="ghost" disabled>Download PNG</button>
       </div>
@@ -62,7 +63,7 @@
       <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple hidden />
       <div class="drop-inner">
         <p class="drop-title">Drop screenshots here</p>
-        <p class="drop-hint">Then click two to match · or drag one onto the montage to snap</p>
+        <p class="drop-hint">Shuffle thumbs · click two to match · drag onto montage to snap</p>
       </div>
     </section>
 
@@ -89,9 +90,9 @@
   </main>
 
   <footer>
-    <p>Runs in your browser. Click pair for a full match · drag-snap for “put it roughly here.”</p>
+    <p>Runs in your browser. Shuffle thumbs, click a pair, or drag-snap onto the montage.</p>
   </footer>
 
-  <script type="module" src="app.js?v=3"></script>
+  <script type="module" src="app.js?v=5"></script>
 </body>
 </html>

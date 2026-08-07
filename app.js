@@ -4,7 +4,7 @@ import {
   matchTwoTiles,
   snapNearOffset,
   compositeMontage,
-} from "./stitcher.js?v=3";
+} from "./stitcher.js?v=5";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -12,6 +12,7 @@ const thumbs = document.getElementById("thumbs");
 const statusEl = document.getElementById("status");
 const countsEl = document.getElementById("counts");
 const clearBtn = document.getElementById("clearBtn");
+const undoBtn = document.getElementById("undoBtn");
 const downloadBtn = document.getElementById("downloadBtn");
 const cropInput = document.getElementById("crop");
 const thresholdInput = document.getElementById("threshold");
@@ -42,6 +43,10 @@ let tileGroup = new Map();
 let nextGroup = 1;
 /** @type {string | null} */
 let activeGroupId = null;
+
+/** Undo stack of placement snapshots (by tile id). */
+/** @type {{ placements: Map<string, { gid: string, dx: number, dy: number }>, nextGroup: number, activeGroupId: string | null }[]} */
+let history = [];
 
 /** @type {string[]} selected loaded ids (max 2 for click-pair) */
 let selection = [];
@@ -90,7 +95,8 @@ function opts() {
 }
 
 function updateButtons() {
-  clearBtn.disabled = busy || (loaded.length === 0 && !resultCanvas);
+  clearBtn.disabled = busy || (loaded.length === 0 && !resultCanvas && history.length === 0);
+  undoBtn.disabled = busy || history.length === 0;
   downloadBtn.disabled = busy || !resultCanvas;
 }
 
@@ -117,7 +123,7 @@ function rebuildTiles() {
   nextGroup = 1;
   activeGroupId = null;
   pending = null;
-  hideReview();
+  history = [];
   selection = [];
   refreshPreview();
   renderThumbs();
@@ -244,9 +250,6 @@ function renderThumbs() {
     wrap.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       const i = indexById(item.id);
-      if (tileGroup.has(i) && !pending) return; // placed tiles: click-only for pair merge
-      // Allow drag of free tiles (or pending moving tile to re-snap)
-      if (tileGroup.has(i) && !(pending && pending.movingIndex === i)) return;
       startDrag(e, i);
     });
 
@@ -411,6 +414,7 @@ async function runPairMatch(idA, idB) {
 
 function acceptPending() {
   if (!pending) return;
+  pushHistory();
   const p = pending;
 
   if (p.mergeGroupId && p.targetGroupId) {
@@ -433,7 +437,6 @@ function acceptPending() {
   } else {
     const abs = groups.get(p.targetGroupId);
     abs.set(p.pending.index, { dx: p.pending.dx, dy: p.pending.dy });
-    // Also ensure base tiles from p.abs seed if any missing (shouldn't)
     tileGroup.set(p.pending.index, p.targetGroupId);
     activeGroupId = p.targetGroupId;
   }
@@ -443,7 +446,8 @@ function acceptPending() {
   refreshPreview();
   renderThumbs();
   updateCounts();
-  setStatus(`Locked. ${tileGroup.size} tiles placed. Click another pair or drag to snap.`);
+  updateButtons();
+  setStatus(`Locked. ${tileGroup.size} tiles placed. Undo to unaccept, or keep joining.`);
 }
 
 function rejectPending() {
@@ -456,13 +460,85 @@ function rejectPending() {
   setStatus("Rejected. Click two images or drag a free tile onto the montage.");
 }
 
+/**
+ * Capture placements keyed by tile id so we can rebuild after reordering / undo.
+ */
+function snapshotPlacementsById() {
+  /** @type {Map<string, { gid: string, dx: number, dy: number }>} */
+  const placements = new Map();
+  for (const [gid, abs] of groups) {
+    for (const [idx, pos] of abs) {
+      placements.set(tiles[idx].id, { gid, dx: pos.dx, dy: pos.dy });
+    }
+  }
+  return placements;
+}
+
+function restorePlacementsById(placements) {
+  groups = new Map();
+  tileGroup = new Map();
+  for (const [id, p] of placements) {
+    const idx = indexById(id);
+    if (idx < 0) continue;
+    if (!groups.has(p.gid)) groups.set(p.gid, new Map());
+    groups.get(p.gid).set(idx, { dx: p.dx, dy: p.dy });
+    tileGroup.set(idx, p.gid);
+  }
+}
+
+function pushHistory() {
+  const placements = snapshotPlacementsById();
+  /** @type {Map<string, { gid: string, dx: number, dy: number }>} */
+  const clone = new Map();
+  for (const [id, p] of placements) {
+    clone.set(id, { gid: p.gid, dx: p.dx, dy: p.dy });
+  }
+  history.push({
+    placements: clone,
+    nextGroup,
+    activeGroupId,
+  });
+  if (history.length > 80) history.shift();
+  updateButtons();
+}
+
+function undoLast() {
+  if (!history.length || busy) return;
+  if (pending) {
+    pending = null;
+    hideReview();
+  }
+  const snap = history.pop();
+  nextGroup = snap.nextGroup;
+  activeGroupId = snap.activeGroupId;
+  restorePlacementsById(snap.placements);
+  if (activeGroupId && !groups.has(activeGroupId)) {
+    activeGroupId = largestGroupId();
+  }
+  selection = [];
+  refreshPreview();
+  renderThumbs();
+  updateCounts();
+  updateButtons();
+  setStatus(
+    history.length
+      ? `Undid last accept. ${tileGroup.size} tiles placed.`
+      : "Undid last accept. Montage cleared — join again when ready."
+  );
+}
+
 acceptBtn.addEventListener("click", acceptPending);
 rejectBtn.addEventListener("click", rejectPending);
 
 window.addEventListener("keydown", (e) => {
-  if (!pending) return;
   if (e.target && ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
   const key = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && key === "z") {
+    e.preventDefault();
+    undoLast();
+    return;
+  }
+  if (!pending) return;
   if (key === "a") {
     e.preventDefault();
     acceptPending();
@@ -472,15 +548,72 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+/**
+ * Move tile `fromId` so it sits before `beforeId` (or at end if beforeId is null).
+ */
+function reorderThumbs(fromId, beforeId) {
+  if (fromId === beforeId) return false;
+  const from = loaded.findIndex((l) => l.id === fromId);
+  if (from < 0) return false;
+
+  const placements = snapshotPlacementsById();
+  const pendingMovingId = pending ? tiles[pending.movingIndex].id : null;
+  const pendingAbsIds = pending
+    ? [...pending.abs.entries()].map(([i, pos]) => [tiles[i].id, pos])
+    : null;
+  const pendingPosId = pending ? tiles[pending.pending.index].id : null;
+  const pendingPos = pending ? { ...pending.pending } : null;
+
+  const next = [...loaded];
+  const [moved] = next.splice(from, 1);
+  let insertAt = beforeId ? next.findIndex((l) => l.id === beforeId) : next.length;
+  if (insertAt < 0) insertAt = next.length;
+  next.splice(insertAt, 0, moved);
+  loaded = next;
+  tiles = loaded.map((l) => tiles.find((t) => t.id === l.id));
+
+  restorePlacementsById(placements);
+
+  if (pending && pendingMovingId && pendingAbsIds && pendingPosId) {
+    const abs = new Map();
+    for (const [id, pos] of pendingAbsIds) {
+      const idx = indexById(id);
+      if (idx >= 0) abs.set(idx, pos);
+    }
+    pending = {
+      ...pending,
+      movingIndex: indexById(pendingMovingId),
+      abs,
+      pending: {
+        index: indexById(pendingPosId),
+        dx: pendingPos.dx,
+        dy: pendingPos.dy,
+      },
+    };
+  }
+
+  return true;
+}
+
+function clearDropHighlights() {
+  thumbs.classList.remove("reorder-active");
+  for (const el of thumbs.querySelectorAll(".drop-target, .drag-source")) {
+    el.classList.remove("drop-target", "drag-source");
+  }
+}
+
+function thumbAtPoint(clientX, clientY) {
+  const el = document.elementFromPoint(clientX, clientY);
+  return el?.closest?.(".thumb-wrap") || null;
+}
+
 function startDrag(e, index) {
   if (busy) return;
-  if (pending && pending.movingIndex !== index) {
-    setStatus("Accept or Reject the current proposal first.", "error");
-    return;
+  if (pending && pending.movingIndex !== index && tileGroup.has(index)) {
+    // Still allow reorder of other placed tiles while a proposal is open
   }
-  // Free tiles, or re-drag the pending tile
-  if (tileGroup.has(index) && !(pending && pending.movingIndex === index)) return;
 
+  const fromId = tiles[index].id;
   dragIndex = index;
   dragMoved = false;
   pointerId = e.pointerId;
@@ -489,18 +622,37 @@ function startDrag(e, index) {
     originEl.setPointerCapture(e.pointerId);
   } catch (_) {}
 
-  const loadedIdx = loaded.findIndex((l) => l.id === tiles[index].id);
+  const loadedIdx = loaded.findIndex((l) => l.id === fromId);
+  let lastHover = null;
 
   const onMove = (ev) => {
     if (ev.pointerId !== pointerId) return;
-    dragMoved = true;
+    if (
+      Math.abs(ev.clientX - e.clientX) + Math.abs(ev.clientY - e.clientY) > 6
+    ) {
+      dragMoved = true;
+    }
+    if (!dragMoved) return;
+
     dragGhost.hidden = false;
     dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
-    const size = 96;
+    const size = 148;
     dragGhost.style.width = `${size}px`;
     dragGhost.style.height = `${size}px`;
     dragGhost.style.left = `${ev.clientX - size / 2}px`;
     dragGhost.style.top = `${ev.clientY - size / 2}px`;
+
+    originEl.classList.add("drag-source");
+    thumbs.classList.add("reorder-active");
+
+    const hover = thumbAtPoint(ev.clientX, ev.clientY);
+    if (lastHover && lastHover !== hover) lastHover.classList.remove("drop-target");
+    if (hover && hover !== originEl) {
+      hover.classList.add("drop-target");
+      lastHover = hover;
+    } else {
+      lastHover = null;
+    }
   };
 
   const onUp = (ev) => {
@@ -509,28 +661,66 @@ function startDrag(e, index) {
     window.removeEventListener("pointerup", onUp);
     window.removeEventListener("pointercancel", onUp);
     dragGhost.hidden = true;
+    clearDropHighlights();
 
     const i = dragIndex;
     dragIndex = null;
     pointerId = null;
 
     if (!dragMoved) return;
-    const rect = previewWrap.getBoundingClientRect();
-    const over =
-      ev.clientX >= rect.left &&
-      ev.clientX <= rect.right &&
-      ev.clientY >= rect.top &&
-      ev.clientY <= rect.bottom;
 
-    if (!over) {
-      setStatus("Drop on the montage to snap. Or click two thumbs to pair-match.");
+    const thumbsRect = thumbs.getBoundingClientRect();
+    const overThumbs =
+      ev.clientX >= thumbsRect.left &&
+      ev.clientX <= thumbsRect.right &&
+      ev.clientY >= thumbsRect.top &&
+      ev.clientY <= thumbsRect.bottom;
+
+    const hover = thumbAtPoint(ev.clientX, ev.clientY);
+    if (overThumbs || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
+      const beforeId = hover && hover.dataset.id !== fromId ? hover.dataset.id : null;
+      if (reorderThumbs(fromId, beforeId)) {
+        selection = selection.filter((id) => loaded.some((l) => l.id === id));
+        renderThumbs();
+        updateCounts();
+        setStatus("Shuffled. Click two neighbors to match, or drag a free tile onto the montage.");
+      }
       setTimeout(() => {
         dragMoved = false;
       }, 0);
       return;
     }
 
-    finishDragSnap(i, ev.clientX, ev.clientY, preview.getBoundingClientRect());
+    const rect = previewWrap.getBoundingClientRect();
+    const overPreview =
+      ev.clientX >= rect.left &&
+      ev.clientX <= rect.right &&
+      ev.clientY >= rect.top &&
+      ev.clientY <= rect.bottom;
+
+    if (overPreview) {
+      if (pending && pending.movingIndex !== i) {
+        setStatus("Accept or Reject the current proposal first.", "error");
+        setTimeout(() => {
+          dragMoved = false;
+        }, 0);
+        return;
+      }
+      if (tileGroup.has(i) && !(pending && pending.movingIndex === i)) {
+        setStatus("That tile is already placed — drag a free tile onto the montage to snap.", "error");
+        setTimeout(() => {
+          dragMoved = false;
+        }, 0);
+        return;
+      }
+      finishDragSnap(i, ev.clientX, ev.clientY, preview.getBoundingClientRect());
+      return;
+    }
+
+    setStatus("Drop on the thumb strip to shuffle, or on the montage to snap.");
+    setTimeout(() => {
+      dragMoved = false;
+    }, 0);
   };
 
   window.addEventListener("pointermove", onMove);
@@ -551,6 +741,7 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
 
     if (!gid) {
       // Start group with this tile alone — user can then attach others
+      pushHistory();
       const newG = `G${nextGroup++}`;
       groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0 }]]));
       tileGroup.set(movingIndex, newG);
@@ -560,7 +751,8 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
       refreshPreview();
       renderThumbs();
       updateCounts();
-      setStatus(`Started ${newG} with “${tiles[movingIndex].name}”. Drag another tile onto it to snap.`);
+      updateButtons();
+      setStatus(`Started ${newG} with “${tiles[movingIndex].name}”. Undo to remove, or drag another tile onto it.`);
       return;
     }
 
@@ -724,6 +916,7 @@ function clearAll() {
   nextGroup = 1;
   activeGroupId = null;
   pending = null;
+  history = [];
   selection = [];
   resultCanvas = null;
   preview.width = 0;
@@ -786,6 +979,7 @@ drop.addEventListener("drop", (e) => {
 });
 
 clearBtn.addEventListener("click", clearAll);
+undoBtn.addEventListener("click", undoLast);
 downloadBtn.addEventListener("click", downloadPng);
 
 updateButtons();
