@@ -525,21 +525,25 @@ body.dragging-work .thumb {
 .preview-wrap {
   position: relative;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
   background:
     radial-gradient(circle at 1px 1px, rgba(196, 232, 106, 0.07) 1px, transparent 0),
     rgba(10, 18, 14, 0.72);
   background-size: 18px 18px, auto;
 }
 
+.preview-wrap.is-panning {
+  cursor: grabbing;
+}
+
 .preview-stage {
   transform-origin: 0 0;
   width: max-content;
-  min-width: 100%;
-  min-height: 100%;
-  display: grid;
-  place-items: center;
-  padding: 1.25rem;
+  display: block;
+  padding: 0;
+  will-change: transform;
 }
 
 .preview-stage canvas {
@@ -547,6 +551,11 @@ body.dragging-work .thumb {
   max-width: none;
   height: auto;
   box-shadow: 0 0 0 1px var(--line);
+  cursor: grab;
+}
+
+.preview-wrap.is-panning canvas {
+  cursor: grabbing;
 }
 
 .preview-empty {

@@ -8,7 +8,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=12";
+} from "./stitcher.js?v=13";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -46,6 +46,8 @@ const panes = {
     canvas: document.getElementById("previewA"),
     zoomEl: document.getElementById("zoomA"),
     zoom: 1,
+    panX: 0,
+    panY: 0,
     /** @type {string | null} */
     groupId: null,
     /** @type {HTMLCanvasElement | null} */
@@ -63,6 +65,8 @@ const panes = {
     canvas: document.getElementById("previewB"),
     zoomEl: document.getElementById("zoomB"),
     zoom: 1,
+    panX: 0,
+    panY: 0,
     /** @type {string | null} */
     groupId: null,
     /** @type {HTMLCanvasElement | null} */
@@ -182,8 +186,24 @@ function setFocusedPane(id, { fit = false } = {}) {
 
 function applyPaneZoom(id) {
   const p = panes[id];
-  p.stage.style.transform = `scale(${p.zoom})`;
+  p.stage.style.transform = `translate(${p.panX}px, ${p.panY}px) scale(${p.zoom})`;
   p.zoomEl.textContent = `${Math.round(p.zoom * 100)}%`;
+}
+
+/** Zoom so the content point under the cursor stays under the cursor. */
+function zoomAtClient(paneId, clientX, clientY, factor) {
+  const p = panes[paneId];
+  const rect = p.wrap.getBoundingClientRect();
+  const mx = clientX - rect.left;
+  const my = clientY - rect.top;
+  const contentX = (mx - p.panX) / p.zoom;
+  const contentY = (my - p.panY) / p.zoom;
+  const next = Math.min(3, Math.max(0.08, p.zoom * factor));
+  p.panX = mx - contentX * next;
+  p.panY = my - contentY * next;
+  p.zoom = next;
+  p.userZoomed = true;
+  applyPaneZoom(paneId);
 }
 
 /** Fit once for empty→first content only; never overrides user scroll-zoom. */
@@ -195,14 +215,18 @@ function fitPaneZoom(id) {
   }
   if (!p.canvas.width) {
     p.zoom = 1;
+    p.panX = 0;
+    p.panY = 0;
     applyPaneZoom(id);
     return;
   }
-  const availW = Math.max(40, p.wrap.clientWidth - 16);
-  const availH = Math.max(40, p.wrap.clientHeight - 16);
+  const availW = Math.max(40, p.wrap.clientWidth - 24);
+  const availH = Math.max(40, p.wrap.clientHeight - 24);
   const sx = availW / p.canvas.width;
   const sy = availH / p.canvas.height;
   p.zoom = Math.min(1.15, Math.max(0.08, Math.min(sx, sy) * 0.96));
+  p.panX = (p.wrap.clientWidth - p.canvas.width * p.zoom) / 2;
+  p.panY = (p.wrap.clientHeight - p.canvas.height * p.zoom) / 2;
   applyPaneZoom(id);
 }
 
@@ -303,6 +327,8 @@ function clearPanePreview(id) {
   p.padX = 0;
   p.padY = 0;
   p.zoom = 1;
+  p.panX = 0;
+  p.panY = 0;
   p.userZoomed = false;
   applyPaneZoom(id);
 }
@@ -928,16 +954,20 @@ function canvasPointerToLocal(p, clientX, clientY) {
  * Grow padded workspace so the moving tile stays fully visible.
  */
 function autoScrollWrap(wrap, clientX, clientY) {
+  const paneId = wrap.id === "previewWrapB" ? "b" : "a";
+  const p = panes[paneId];
   const rect = wrap.getBoundingClientRect();
   const edge = 56;
   let dx = 0;
   let dy = 0;
-  if (clientX < rect.left + edge) dx = -Math.ceil((edge - (clientX - rect.left)) / 3);
-  else if (clientX > rect.right - edge) dx = Math.ceil((edge - (rect.right - clientX)) / 3);
-  if (clientY < rect.top + edge) dy = -Math.ceil((edge - (clientY - rect.top)) / 3);
-  else if (clientY > rect.bottom - edge) dy = Math.ceil((edge - (rect.bottom - clientY)) / 3);
-  if (dx) wrap.scrollLeft += dx;
-  if (dy) wrap.scrollTop += dy;
+  if (clientX < rect.left + edge) dx = Math.ceil((edge - (clientX - rect.left)) / 3);
+  else if (clientX > rect.right - edge) dx = -Math.ceil((edge - (rect.right - clientX)) / 3);
+  if (clientY < rect.top + edge) dy = Math.ceil((edge - (clientY - rect.top)) / 3);
+  else if (clientY > rect.bottom - edge) dy = -Math.ceil((edge - (rect.bottom - clientY)) / 3);
+  if (!dx && !dy) return;
+  p.panX += dx;
+  p.panY += dy;
+  applyPaneZoom(paneId);
 }
 
 function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
@@ -1572,6 +1602,48 @@ function hitTestPaneTile(paneId, clientX, clientY) {
   return null;
 }
 
+let spaceHeld = false;
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && e.target && !["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) {
+    spaceHeld = true;
+    e.preventDefault();
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") spaceHeld = false;
+});
+
+function startPan(e, paneId) {
+  const p = panes[paneId];
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const origX = p.panX;
+  const origY = p.panY;
+  const pointer = e.pointerId;
+  p.wrap.classList.add("is-panning");
+  try {
+    p.wrap.setPointerCapture(pointer);
+  } catch (_) {}
+
+  const onMove = (ev) => {
+    if (ev.pointerId !== pointer) return;
+    p.panX = origX + (ev.clientX - startX);
+    p.panY = origY + (ev.clientY - startY);
+    applyPaneZoom(paneId);
+  };
+  const onUp = (ev) => {
+    if (ev.pointerId !== pointer) return;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    p.wrap.classList.remove("is-panning");
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
 function bindPaneInteraction(paneId) {
   const p = panes[paneId];
   p.el.addEventListener("pointerdown", () => setFocusedPane(paneId));
@@ -1581,18 +1653,51 @@ function bindPaneInteraction(paneId) {
       e.preventDefault();
       setFocusedPane(paneId);
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      p.zoom = Math.min(3, Math.max(0.08, p.zoom * factor));
-      p.userZoomed = true;
-      applyPaneZoom(paneId);
+      zoomAtClient(paneId, e.clientX, e.clientY, factor);
     },
     { passive: false }
   );
 
+  p.wrap.addEventListener("pointerdown", (e) => {
+    if (busy) return;
+    setFocusedPane(paneId);
+
+    // Middle mouse, Alt, or Space+drag → always pan
+    if (e.button === 1 || e.altKey || (e.button === 0 && spaceHeld)) {
+      e.preventDefault();
+      startPan(e, paneId);
+      return;
+    }
+
+    if (e.button !== 0) return;
+
+    // Click empty montage background → pan
+    if (e.target === p.wrap || e.target === p.stage) {
+      e.preventDefault();
+      startPan(e, paneId);
+    }
+  });
+
   p.canvas.addEventListener("pointerdown", (e) => {
+    if (e.button === 1 || e.altKey || (e.button === 0 && spaceHeld)) {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedPane(paneId);
+      startPan(e, paneId);
+      return;
+    }
     if (e.button !== 0 || busy) return;
     setFocusedPane(paneId);
     const hit = hitTestPaneTile(paneId, e.clientX, e.clientY);
-    if (hit == null) return;
+
+    if (hit == null) {
+      // Empty padded canvas area → pan
+      e.preventDefault();
+      e.stopPropagation();
+      startPan(e, paneId);
+      return;
+    }
+
     const id = tiles[hit].id;
 
     if (e.ctrlKey || e.metaKey) {
@@ -1608,7 +1713,11 @@ function bindPaneInteraction(paneId) {
     selection = [id];
     renderThumbs();
     if (lockedIds.has(id)) {
-      setStatus("Locked tile selected — Unlock to re-drag.");
+      // Locked tile: pan the view instead of moving the photo
+      e.preventDefault();
+      e.stopPropagation();
+      startPan(e, paneId);
+      setStatus("Locked tile — Unlock to re-drag, or drag empty area / Space to pan.");
       return;
     }
     e.preventDefault();
