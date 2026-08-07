@@ -299,6 +299,15 @@ body.dragging-work .workspace-grid {
   outline-offset: 2px;
 }
 
+.thumb-wrap.locked .thumb {
+  box-shadow: inset 0 0 0 3px rgba(196, 232, 106, 0.55);
+}
+
+.thumb-wrap.locked .group-badge {
+  background: #e8c547;
+  color: var(--accent-ink);
+}
+
 .thumb-wrap .thumb,
 .thumb {
   display: block;

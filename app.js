@@ -8,7 +8,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=8";
+} from "./stitcher.js?v=9";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -20,6 +20,10 @@ const countsEl = document.getElementById("counts");
 const clearBtn = document.getElementById("clearBtn");
 const undoBtn = document.getElementById("undoBtn");
 const downloadBtn = document.getElementById("downloadBtn");
+const matchBtn = document.getElementById("matchBtn");
+const lockBtn = document.getElementById("lockBtn");
+const unlockBtn = document.getElementById("unlockBtn");
+const returnBtn = document.getElementById("returnBtn");
 const cropInput = document.getElementById("crop");
 const thresholdInput = document.getElementById("threshold");
 const thresholdOut = document.getElementById("thresholdOut");
@@ -88,8 +92,12 @@ let nextGroup = 1;
 /** @type {{ placements: Map<string, { gid: string, dx: number, dy: number }>, nextGroup: number, paneGroups: { a: string | null, b: string | null } }[]} */
 let history = [];
 
-/** @type {string[]} selected loaded ids (max 2 for click-pair) */
+/** @type {string[]} selected loaded ids */
 let selection = [];
+
+/** Locked tile ids — cannot be re-dragged until Unlock */
+/** @type {Set<string>} */
+let lockedIds = new Set();
 
 /**
  * @type {null | {
@@ -103,6 +111,7 @@ let selection = [];
  *   mergeGroupId: string | null,
  *   mergeDelta?: { dx: number, dy: number },
  *   paneId: "a" | "b",
+ *   realign?: boolean,
  * }}
  */
 let pending = null;
@@ -202,13 +211,29 @@ function updateButtons() {
   clearBtn.disabled = busy || (loaded.length === 0 && !hasResult && history.length === 0);
   undoBtn.disabled = busy || history.length === 0;
   downloadBtn.disabled = busy || !hasResult;
+
+  const selectedIdx = selection.map((id) => indexById(id)).filter((i) => i >= 0);
+  const placedSel = selectedIdx.filter((i) => tileGroup.has(i));
+  const lockedSel = selection.filter((id) => lockedIds.has(id));
+  const unlockedPlaced = placedSel.filter((i) => !lockedIds.has(tiles[i].id));
+
+  matchBtn.disabled = busy || Boolean(pending) || selection.length !== 2;
+  lockBtn.disabled = busy || Boolean(pending) || unlockedPlaced.length === 0;
+  unlockBtn.disabled = busy || Boolean(pending) || lockedSel.length === 0;
+  returnBtn.disabled = busy || Boolean(pending) || placedSel.length === 0;
 }
 
 function updateCounts() {
   const placed = tileGroup.size;
-  countsEl.textContent = loaded.length
-    ? `${loaded.length} loaded · ${placed} placed · ${groups.size} group${groups.size === 1 ? "" : "s"}`
-    : "";
+  const locked = lockedIds.size;
+  const sel = selection.length;
+  const parts = [];
+  if (loaded.length) parts.push(`${loaded.length} loaded`);
+  if (placed) parts.push(`${placed} placed`);
+  if (locked) parts.push(`${locked} locked`);
+  if (sel) parts.push(`${sel} selected`);
+  if (groups.size) parts.push(`${groups.size} group${groups.size === 1 ? "" : "s"}`);
+  countsEl.textContent = parts.join(" · ");
 }
 
 function updateThumbSize() {
@@ -242,6 +267,7 @@ function rebuildTiles() {
   pending = null;
   history = [];
   selection = [];
+  lockedIds = new Set();
   refreshAllPreviews();
   renderThumbs();
   updateThumbSize();
@@ -366,6 +392,7 @@ function renderThumbs() {
       wrap.classList.add("placed");
       wrap.dataset.group = gid;
     }
+    if (lockedIds.has(item.id)) wrap.classList.add("locked");
     if (pending && pending.movingIndex === idx) wrap.classList.add("pending");
 
     const img = document.createElement("img");
@@ -377,14 +404,17 @@ function renderThumbs() {
     const meta = document.createElement("span");
     meta.className = "thumb-meta";
     if (pending && pending.movingIndex === idx) meta.textContent = "review";
+    else if (lockedIds.has(item.id)) meta.textContent = gid ? `${gid} · locked` : "locked";
     else if (gid) meta.textContent = gid;
-    else if (selection.includes(item.id)) meta.textContent = selection[0] === item.id ? "1st" : "2nd";
-    else meta.textContent = item.file.name;
+    else if (selection.includes(item.id)) {
+      const n = selection.indexOf(item.id) + 1;
+      meta.textContent = selection.length <= 2 ? (n === 1 ? "1st" : "2nd") : `#${n}`;
+    } else meta.textContent = item.file.name;
 
     if (gid) {
       const badge = document.createElement("span");
       badge.className = "group-badge";
-      badge.textContent = gid;
+      badge.textContent = lockedIds.has(item.id) ? `${gid}·L` : gid;
       wrap.appendChild(badge);
     }
 
@@ -392,48 +422,76 @@ function renderThumbs() {
     wrap.appendChild(meta);
     wrap.title = item.file.name;
 
-    wrap.addEventListener("click", () => {
+    wrap.addEventListener("click", (e) => {
       if (dragMoved) {
         dragMoved = false;
         return;
       }
-      onThumbClick(item.id);
+      onThumbClick(item.id, e);
     });
 
     wrap.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       const i = indexById(item.id);
-      startDrag(e, i);
+      if (lockedIds.has(item.id) && tileGroup.has(i)) {
+        // Still allow click-select; block drag start for locked
+        return;
+      }
+      startDrag(e, i, wrap);
     });
 
     thumbs.appendChild(wrap);
   }
+  updateButtons();
+  updateCounts();
 }
 
-function onThumbClick(id) {
+function onThumbClick(id, e = null) {
   if (busy) return;
   if (pending) {
     setStatus("Accept or Reject the current proposal first.", "error");
     return;
   }
 
-  if (selection.includes(id)) {
-    selection = selection.filter((x) => x !== id);
+  const multi = e && (e.ctrlKey || e.metaKey);
+
+  if (multi) {
+    if (selection.includes(id)) selection = selection.filter((x) => x !== id);
+    else selection.push(id);
     renderThumbs();
-    setStatus(selection.length ? "Select a second image to match." : "Click two images, or drag one onto a workspace.");
+    setStatus(
+      selection.length
+        ? `${selection.length} selected — Lock / Unlock / Return / Del, or Match when exactly 2.`
+        : "Selection cleared."
+    );
     return;
   }
 
-  if (selection.length >= 2) selection = [];
-  selection.push(id);
+  if (selection.includes(id) && selection.length === 1) {
+    selection = [];
+    renderThumbs();
+    setStatus("Selection cleared. Click tiles to select, or drag onto a workspace.");
+    return;
+  }
+
+  if (selection.length === 1 && selection[0] !== id) {
+    selection = [selection[0], id];
+    renderThumbs();
+    runPairMatch(selection[0], selection[1]);
+    return;
+  }
+
+  selection = [id];
   renderThumbs();
-
-  if (selection.length === 1) {
-    setStatus("Select a second overlapping image (or drag this one onto a workspace).");
-    return;
-  }
-
-  runPairMatch(selection[0], selection[1]);
+  const idx = indexById(id);
+  const placed = tileGroup.has(idx);
+  setStatus(
+    placed
+      ? lockedIds.has(id)
+        ? "Locked tile selected — Unlock to re-drag, or Ctrl+click more to Unlock/Return."
+        : "Placed tile selected — drag to re-fit, Ctrl+click to multi-select, or click another to match."
+      : "Select a second overlapping image (or drag this one onto a workspace)."
+  );
 }
 
 async function runPairMatch(idA, idB) {
@@ -516,8 +574,37 @@ async function runPairMatch(idA, idB) {
       setStatus(`Merge groups via ${tiles[iA].name} + ${tiles[iB].name}`, "busy");
       renderThumbs();
       return;
+    } else if (gA && gB && gA === gB) {
+      // Same group: realign second tile relative to first
+      abs = new Map(groups.get(gA));
+      abs.delete(iB);
+      const aPos = groups.get(gA).get(iA);
+      movingIndex = iB;
+      pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
+      targetGroupId = gA;
+      pending = {
+        movingIndex,
+        abs,
+        pending: pendingPos,
+        score: hit.score,
+        edge: hit.edge,
+        targetGroupId,
+        mergeGroupId: null,
+        paneId,
+        realign: true,
+      };
+      selection = [];
+      panes[paneId].groupId = gA;
+      refreshAllPreviews();
+      fitPaneZoom(paneId);
+      showReview(
+        `Re-fit “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}`
+      );
+      setStatus("Accept to update alignment, Reject to keep the old position, or drag again.", "busy");
+      renderThumbs();
+      return;
     } else {
-      setStatus("Those two are already in the same group.", "error");
+      setStatus("Could not join that pair.", "error");
       selection = [];
       renderThumbs();
       return;
@@ -586,7 +673,11 @@ function acceptPending() {
   renderThumbs();
   updateCounts();
   updateButtons();
-  setStatus(`Locked. ${tileGroup.size} tiles placed. Undo to unaccept, or keep joining.`);
+  setStatus(
+    p.realign
+      ? `Re-fit saved. Lock selected tiles when the alignment looks right.`
+      : `Joined. ${tileGroup.size} tiles placed. Re-drag unlocked tiles to refine, then Lock.`
+  );
 }
 
 function rejectPending() {
@@ -596,7 +687,125 @@ function rejectPending() {
   selection = [];
   refreshAllPreviews();
   renderThumbs();
-  setStatus("Rejected. Click two images or drag a free tile onto a workspace.");
+  setStatus("Rejected. Re-drag to try another fit, or pick another pair.");
+}
+
+function lockSelected() {
+  if (busy || pending) return;
+  const ids = selection.filter((id) => {
+    const i = indexById(id);
+    return i >= 0 && tileGroup.has(i);
+  });
+  if (!ids.length) {
+    setStatus("Select placed tiles to lock.", "error");
+    return;
+  }
+  pushHistory();
+  for (const id of ids) lockedIds.add(id);
+  renderThumbs();
+  updateButtons();
+  updateCounts();
+  setStatus(`Locked ${ids.length} tile${ids.length === 1 ? "" : "s"} together — Unlock to move again.`);
+}
+
+function unlockSelected() {
+  if (busy || pending) return;
+  const ids = selection.filter((id) => lockedIds.has(id));
+  if (!ids.length) {
+    setStatus("Select locked tiles to unlock.", "error");
+    return;
+  }
+  pushHistory();
+  for (const id of ids) lockedIds.delete(id);
+  renderThumbs();
+  updateButtons();
+  updateCounts();
+  setStatus(`Unlocked ${ids.length} tile${ids.length === 1 ? "" : "s"} — drag to re-fit.`);
+}
+
+function returnSelectedToRail() {
+  if (busy || pending) return;
+  const ids = selection.filter((id) => {
+    const i = indexById(id);
+    return i >= 0 && tileGroup.has(i);
+  });
+  if (!ids.length) {
+    setStatus("Select placed tiles to return to the photo rail.", "error");
+    return;
+  }
+  unplaceByIds(ids);
+  setStatus(`Returned ${ids.length} tile${ids.length === 1 ? "" : "s"} to the left rail.`);
+}
+
+function unplaceByIds(ids, { recordHistory = true } = {}) {
+  if (recordHistory) pushHistory();
+  for (const id of ids) {
+    const idx = indexById(id);
+    if (idx < 0) continue;
+    const gid = tileGroup.get(idx);
+    if (!gid) continue;
+    const abs = groups.get(gid);
+    if (abs) {
+      abs.delete(idx);
+      if (abs.size === 0) {
+        groups.delete(gid);
+        for (const pan of Object.values(panes)) {
+          if (pan.groupId === gid) pan.groupId = null;
+        }
+      }
+    }
+    tileGroup.delete(idx);
+    lockedIds.delete(id);
+  }
+  selection = selection.filter((id) => loaded.some((l) => l.id === id));
+  refreshAllPreviews();
+  renderThumbs();
+  updateCounts();
+  updateButtons();
+}
+
+function removeSelectedPhotos() {
+  if (busy || pending) {
+    setStatus("Accept or Reject the current proposal first.", "error");
+    return;
+  }
+  if (!selection.length) return;
+  const ids = [...selection];
+  pushHistory();
+  unplaceByIds(ids, { recordHistory: false });
+  const idSet = new Set(ids);
+  for (const item of loaded) {
+    if (idSet.has(item.id)) URL.revokeObjectURL(item.url);
+  }
+  const placements = snapshotPlacementsById();
+  const lockedSnap = [...lockedIds].filter((id) => !idSet.has(id));
+  loaded = loaded.filter((l) => !idSet.has(l.id));
+  const cropPx = Number(cropInput.value) || 0;
+  tiles = loaded.map((item) => {
+    const cropped = cropImage(item.img, cropPx, item.file.name);
+    return { ...cropped, id: item.id };
+  });
+  restorePlacementsById(placements);
+  lockedIds = new Set(lockedSnap.filter((id) => indexById(id) >= 0));
+  selection = [];
+  updateCropPreview();
+  updateThumbSize();
+  refreshAllPreviews();
+  renderThumbs();
+  updateCounts();
+  updateButtons();
+  setStatus(`Removed ${ids.length} photo${ids.length === 1 ? "" : "s"}.`);
+}
+
+function matchSelected() {
+  if (selection.length !== 2) return;
+  runPairMatch(selection[0], selection[1]);
+}
+
+function absWithoutTile(gid, excludeIndex) {
+  const abs = new Map(groups.get(gid));
+  abs.delete(excludeIndex);
+  return abs;
 }
 
 function snapshotPlacementsById() {
@@ -633,6 +842,7 @@ function pushHistory() {
     placements: clone,
     nextGroup,
     paneGroups: { a: panes.a.groupId, b: panes.b.groupId },
+    lockedIds: [...lockedIds],
   });
   if (history.length > 80) history.shift();
   updateButtons();
@@ -649,6 +859,7 @@ function undoLast() {
   panes.a.groupId = snap.paneGroups.a;
   panes.b.groupId = snap.paneGroups.b;
   restorePlacementsById(snap.placements);
+  lockedIds = new Set(snap.lockedIds || []);
   for (const pan of Object.values(panes)) {
     if (pan.groupId && !groups.has(pan.groupId)) pan.groupId = null;
   }
@@ -659,8 +870,8 @@ function undoLast() {
   updateButtons();
   setStatus(
     history.length
-      ? `Undid last accept. ${tileGroup.size} tiles placed.`
-      : "Undid last accept. Montage cleared — join again when ready."
+      ? `Undid last change. ${tileGroup.size} tiles placed.`
+      : "Undid last change. Montage cleared — join again when ready."
   );
 }
 
@@ -675,13 +886,29 @@ window.addEventListener("keydown", (e) => {
     undoLast();
     return;
   }
-  if (!pending) return;
-  if (key === "a") {
+  if (key === "delete" || key === "backspace") {
+    if (selection.length) {
+      e.preventDefault();
+      removeSelectedPhotos();
+    }
+    return;
+  }
+  if (pending) {
+    if (key === "a") {
+      e.preventDefault();
+      acceptPending();
+    } else if (key === "r") {
+      e.preventDefault();
+      rejectPending();
+    }
+    return;
+  }
+  if (key === "l" && !lockBtn.disabled) {
     e.preventDefault();
-    acceptPending();
-  } else if (key === "r") {
+    lockSelected();
+  } else if (key === "u" && !unlockBtn.disabled) {
     e.preventDefault();
-    rejectPending();
+    unlockSelected();
   }
 });
 
@@ -774,7 +1001,26 @@ function prepareDragBase(paneId, movingIndex = -1) {
     dragPad = { x: 0, y: 0 };
     return null;
   }
-  const { canvas, origin } = compositeMontage(tiles, groups.get(gid), null);
+  const baseAbs =
+    movingIndex >= 0 && tileGroup.get(movingIndex) === gid
+      ? absWithoutTile(gid, movingIndex)
+      : new Map(groups.get(gid));
+  if (!baseAbs.size && movingIndex >= 0 && tileGroup.get(movingIndex) === gid) {
+    // Only this tile in the group — treat as empty base for reposition seed
+    dragBaseCanvas = null;
+    dragCoreCanvas = null;
+    dragBaseOrigin = null;
+    dragPad = { x: 0, y: 0 };
+    return gid;
+  }
+  if (!baseAbs.size) {
+    dragBaseCanvas = null;
+    dragCoreCanvas = null;
+    dragBaseOrigin = null;
+    dragPad = { x: 0, y: 0 };
+    return null;
+  }
+  const { canvas, origin } = compositeMontage(tiles, baseAbs, null);
   const pad = workspacePadFor(tiles, movingIndex);
   const { canvas: padded, padX, padY } = padWorkspace(canvas, pad.x, pad.y);
   dragCoreCanvas = canvas;
@@ -967,22 +1213,31 @@ function autoScrollRail(clientY) {
   });
 }
 
-function startDrag(e, index) {
+function startDrag(e, index, originEl = null) {
   if (busy) return;
+  const tileId = tiles[index]?.id;
+  if (!tileId) return;
+  if (lockedIds.has(tileId) && tileGroup.has(index)) {
+    setStatus("That tile is locked — Unlock it before re-dragging.", "error");
+    return;
+  }
 
-  const fromId = tiles[index].id;
+  const fromId = tileId;
   dragIndex = index;
   dragMoved = false;
   pointerId = e.pointerId;
-  const originEl = e.currentTarget;
+  const captureEl = originEl || e.currentTarget;
   try {
-    originEl.setPointerCapture(e.pointerId);
+    captureEl?.setPointerCapture?.(e.pointerId);
   } catch (_) {}
 
   const loadedIdx = loaded.findIndex((l) => l.id === fromId);
   let lastHover = null;
   const canLiveSnap =
-    !tileGroup.has(index) || (pending && pending.movingIndex === index);
+    !lockedIds.has(fromId) &&
+    (!tileGroup.has(index) ||
+      (pending && pending.movingIndex === index) ||
+      tileGroup.has(index));
 
   document.body.classList.add("dragging-work");
 
@@ -993,7 +1248,7 @@ function startDrag(e, index) {
     }
     if (!dragMoved) return;
 
-    originEl.classList.add("drag-source");
+    captureEl?.classList?.add("drag-source");
     autoScrollRail(ev.clientY);
 
     const overPane = paneAtPoint(ev.clientX, ev.clientY);
@@ -1020,7 +1275,7 @@ function startDrag(e, index) {
         return;
       }
 
-      // Empty pane: show ghost, ready to seed
+      // Empty pane (or sole-tile group lifted): show ghost
       dragGhost.hidden = false;
       dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
       const size = Math.min(200, Math.max(100, tiles[index].width * panes[overPane].zoom * 0.35));
@@ -1029,11 +1284,10 @@ function startDrag(e, index) {
       dragGhost.style.left = `${ev.clientX - size / 2}px`;
       dragGhost.style.top = `${ev.clientY - size / 2}px`;
       hideLiveConf();
-      setStatus(`Drop to start a montage in Workspace ${overPane.toUpperCase()}.`, "busy");
+      setStatus(`Drop to start / place in Workspace ${overPane.toUpperCase()}.`, "busy");
       return;
     }
 
-    // Left preview mid-drag — restore base on last target
     if (dragTargetPane && dragBaseCanvas) {
       const prev = panes[dragTargetPane];
       if (prev.canvas.width) {
@@ -1057,7 +1311,7 @@ function startDrag(e, index) {
 
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
     if (lastHover && lastHover !== hover) lastHover.classList.remove("drop-target");
-    if (hover && hover !== originEl) {
+    if (hover && hover !== captureEl) {
       hover.classList.add("drop-target");
       lastHover = hover;
     } else {
@@ -1085,13 +1339,31 @@ function startDrag(e, index) {
     }
 
     const thumbsRect = thumbs.getBoundingClientRect();
+    const dropRect = drop.getBoundingClientRect();
     const overThumbs =
       ev.clientX >= thumbsRect.left &&
       ev.clientX <= thumbsRect.right &&
       ev.clientY >= thumbsRect.top &&
       ev.clientY <= thumbsRect.bottom;
+    const overDropZone =
+      ev.clientX >= dropRect.left &&
+      ev.clientX <= dropRect.right &&
+      ev.clientY >= dropRect.top &&
+      ev.clientY <= dropRect.bottom;
 
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
+
+    // Return placed tile to rail when dropped on drop-zone or empty rail (not on another thumb)
+    if (tileGroup.has(i) && (overDropZone || (overThumbs && !hover))) {
+      clearMontageDragPreview();
+      unplaceByIds([fromId]);
+      setStatus(`Returned “${tiles[i]?.name || fromId}” to the left rail.`);
+      setTimeout(() => {
+        dragMoved = false;
+      }, 0);
+      return;
+    }
+
     if (overThumbs || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
       clearMontageDragPreview();
       refreshAllPreviews();
@@ -1100,7 +1372,7 @@ function startDrag(e, index) {
         selection = selection.filter((id) => loaded.some((l) => l.id === id));
         renderThumbs();
         updateCounts();
-        setStatus("Shuffled. Click two neighbors to match, or drag a free tile onto a workspace.");
+        setStatus("Shuffled. Click two to match, or drag onto a workspace.");
       }
       setTimeout(() => {
         dragMoved = false;
@@ -1119,15 +1391,6 @@ function startDrag(e, index) {
         }, 0);
         return;
       }
-      if (tileGroup.has(i) && !(pending && pending.movingIndex === i)) {
-        clearMontageDragPreview();
-        refreshAllPreviews();
-        setStatus("That tile is already placed — drag a free tile onto a workspace to snap.", "error");
-        setTimeout(() => {
-          dragMoved = false;
-        }, 0);
-        return;
-      }
       setFocusedPane(overPane);
       const rect = panes[overPane].canvas.getBoundingClientRect();
       finishDragSnap(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
@@ -1138,7 +1401,7 @@ function startDrag(e, index) {
 
     clearMontageDragPreview();
     refreshAllPreviews();
-    setStatus("Drop on the photo rail to shuffle, or on a workspace to snap.");
+    setStatus("Drop on a workspace to snap, or on the left rail to return / shuffle.");
     setTimeout(() => {
       dragMoved = false;
     }, 0);
@@ -1158,9 +1421,14 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
     await yieldUi();
 
     let gid = groupForPane(paneId);
+    const wasInGroup = tileGroup.get(movingIndex);
+    const realigning = Boolean(wasInGroup && wasInGroup === gid);
 
     if (!gid) {
       pushHistory();
+      if (wasInGroup) {
+        unplaceByIds([tiles[movingIndex].id], { recordHistory: false });
+      }
       const newG = `G${nextGroup++}`;
       groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0 }]]));
       tileGroup.set(movingIndex, newG);
@@ -1178,16 +1446,31 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       return;
     }
 
-    if (tileGroup.has(movingIndex) && tileGroup.get(movingIndex) === gid) {
-      setStatus("That tile is already in this group.", "error");
+    // Moving a tile from another group onto this pane: unplace first, then snap as free
+    if (wasInGroup && wasInGroup !== gid) {
+      pushHistory();
+      unplaceByIds([tiles[movingIndex].id], { recordHistory: false });
+    }
+
+    const baseAbs = realigning ? absWithoutTile(gid, movingIndex) : new Map(groups.get(gid));
+    if (!baseAbs.size) {
+      // Solo tile re-drop on its own empty group — keep at origin
+      pushHistory();
+      groups.get(gid).set(movingIndex, { dx: 0, dy: 0 });
+      tileGroup.set(movingIndex, gid);
+      pending = null;
+      hideReview();
+      refreshAllPreviews();
+      renderThumbs();
+      updateCounts();
+      updateButtons();
+      setStatus("Tile reset in place. Drag another overlapping photo onto it.");
       return;
     }
 
-    const abs = groups.get(gid);
-    const { canvas: montageCanvas, origin } = compositeMontage(tiles, abs, null);
+    const { canvas: montageCanvas, origin } = compositeMontage(tiles, baseAbs, null);
 
     const p = panes[paneId];
-    // Prefer live canvas rect if available (accounts for zoom + workspace pad)
     const liveRect = p.canvas.width ? p.canvas.getBoundingClientRect() : rect;
     const padX = dragPad.x || p.padX || 0;
     const padY = dragPad.y || p.padY || 0;
@@ -1206,11 +1489,11 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       tiles[movingIndex],
       guessInMontage.dx,
       guessInMontage.dy,
-      { ...opts(), radius: 120 }
+      { ...opts(), radius: 140 }
     );
 
     if (!hit) {
-      setStatus("Snap failed — try a closer drop or click-pair instead.", "error");
+      setStatus("Snap failed — try a closer drop, or click-pair Match.", "error");
       refreshAllPreviews();
       return;
     }
@@ -1220,7 +1503,7 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
 
     pending = {
       movingIndex,
-      abs: new Map(abs),
+      abs: baseAbs,
       pending: { index: movingIndex, dx: absDx, dy: absDy },
       score: hit.score,
       edge: hit.edge,
@@ -1228,19 +1511,21 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
       targetGroupId: gid,
       mergeGroupId: null,
       paneId,
+      realign: realigning,
     };
     panes[paneId].groupId = gid;
-    selection = [];
+    selection = [tiles[movingIndex].id];
     refreshAllPreviews();
     fitPaneZoom(paneId);
     const weakNote = hit.weak ? " (weak — nudge & re-drop if needed)" : "";
+    const label = realigning ? "Re-fit" : "Snap";
     showReview(
-      `Snap “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}${weakNote}`
+      `${label} “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}${weakNote}`
     );
     setStatus(
       hit.weak
-        ? "Weak snap at drop position — Accept, Reject, or drag again for a better fit."
-        : "Snapped. Accept to lock, or drag again to re-snap.",
+        ? "Weak snap — Accept, Reject, or drag again for a better fit."
+        : `${label} ready. Accept to keep, or drag again for a second attempt.`,
       "busy"
     );
     renderThumbs();
@@ -1422,6 +1707,7 @@ function clearAll() {
   pending = null;
   history = [];
   selection = [];
+  lockedIds = new Set();
   clearPanePreview("a");
   clearPanePreview("b");
   cropPreview.hidden = true;
@@ -1455,21 +1741,80 @@ function yieldUi() {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-// Pane focus + wheel zoom
-for (const id of /** @type {const} */ (["a", "b"])) {
-  const p = panes[id];
-  p.el.addEventListener("pointerdown", () => setFocusedPane(id));
+/**
+ * Pick topmost tile under pointer in a pane (for overlap disambiguation).
+ * @returns {number | null} tile index
+ */
+function hitTestPaneTile(paneId, clientX, clientY) {
+  const gid = groupForPane(paneId);
+  if (!gid) return null;
+  const p = panes[paneId];
+  const mapped = canvasPointerToLocal(p, clientX, clientY);
+  if (!mapped) return null;
+  const coreX = mapped.localX - (p.padX || 0);
+  const coreY = mapped.localY - (p.padY || 0);
+  const abs = groups.get(gid);
+  const { origin } = compositeMontage(tiles, abs, null);
+  const entries = [...abs.entries()].sort(
+    (a, b) => b[1].dx + b[1].dy - (a[1].dx + a[1].dy)
+  );
+  for (const [i, pos] of entries) {
+    const x = pos.dx - origin.minX;
+    const y = pos.dy - origin.minY;
+    const t = tiles[i];
+    if (coreX >= x && coreX < x + t.width && coreY >= y && coreY < y + t.height) {
+      return i;
+    }
+  }
+  return null;
+}
+
+function bindPaneInteraction(paneId) {
+  const p = panes[paneId];
+  p.el.addEventListener("pointerdown", () => setFocusedPane(paneId));
   p.wrap.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
-      setFocusedPane(id);
+      setFocusedPane(paneId);
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
       p.zoom = Math.min(3, Math.max(0.08, p.zoom * factor));
-      applyPaneZoom(id);
+      applyPaneZoom(paneId);
     },
     { passive: false }
   );
+
+  p.canvas.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || busy) return;
+    setFocusedPane(paneId);
+    const hit = hitTestPaneTile(paneId, e.clientX, e.clientY);
+    if (hit == null) return;
+    const id = tiles[hit].id;
+
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (selection.includes(id)) selection = selection.filter((x) => x !== id);
+      else selection.push(id);
+      renderThumbs();
+      setStatus(`${selection.length} selected from montage.`);
+      return;
+    }
+
+    selection = [id];
+    renderThumbs();
+    if (lockedIds.has(id)) {
+      setStatus("Locked tile selected — Unlock to re-drag.");
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    startDrag(e, hit, p.canvas);
+  });
+}
+
+for (const id of /** @type {const} */ (["a", "b"])) {
+  bindPaneInteraction(id);
 }
 
 drop.addEventListener("click", () => fileInput.click());
@@ -1502,6 +1847,10 @@ drop.addEventListener("drop", (e) => {
 clearBtn.addEventListener("click", clearAll);
 undoBtn.addEventListener("click", undoLast);
 downloadBtn.addEventListener("click", downloadPng);
+matchBtn.addEventListener("click", matchSelected);
+lockBtn.addEventListener("click", lockSelected);
+unlockBtn.addEventListener("click", unlockSelected);
+returnBtn.addEventListener("click", returnSelectedToRail);
 
 window.addEventListener("resize", () => {
   for (const id of /** @type {const} */ (["a", "b"])) {

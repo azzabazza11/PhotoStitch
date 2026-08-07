@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=8" />
+  <link rel="stylesheet" href="styles.css?v=9" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -39,6 +39,10 @@
           </select>
         </label>
         <div class="actions">
+          <button type="button" id="matchBtn" class="ghost" disabled>Match</button>
+          <button type="button" id="lockBtn" class="ghost" disabled>Lock</button>
+          <button type="button" id="unlockBtn" class="ghost" disabled>Unlock</button>
+          <button type="button" id="returnBtn" class="ghost" disabled>Return</button>
           <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
           <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
           <button type="button" id="downloadBtn" class="ghost" disabled>Download</button>
@@ -125,11 +129,11 @@
     </div>
 
     <footer>
-      <p>Hover left rail to expand · collapses while dragging · padded montage so tiles stay fully visible · duplicates skipped by name+size then pixels · wheel zooms · Undo Ctrl+Z</p>
+      <p>Click thumbs or montage tiles to select · Ctrl/Cmd+click multi-select · Lock / Unlock · Return to rail · Del removes · Re-drag unlocked tiles to re-fit · Undo Ctrl+Z</p>
     </footer>
   </div>
 
   <div id="dragGhost" class="drag-ghost" hidden></div>
-  <script type="module" src="app.js?v=8"></script>
+  <script type="module" src="app.js?v=9"></script>
 </body>
 </html>
