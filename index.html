@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=18" />
+  <link rel="stylesheet" href="styles.css?v=19" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -17,7 +17,7 @@
   <div class="app-shell">
     <header class="top">
       <div class="top-text">
-        <p class="brand">PhotoStitch</p>
+        <p class="brand">PhotoStitch <span class="app-version" id="appVersion">v?</span></p>
         <p class="tag">Photos left · workspace right. Toggle a second workspace when you need another montage.</p>
       </div>
       <section class="controls" aria-label="Stitch settings">
@@ -122,11 +122,11 @@
     </div>
 
     <footer>
-      <p>Align by eye while dragging (meter + tint) · drop places exactly there · Match for auto-align · scroll zooms · drag empty / Space to pan · Undo Ctrl+Z</p>
+      <p><span id="appVersionFooter">v?</span> · Align by eye while dragging (meter + tint) · drop places exactly there · Match for auto-align · scroll zooms · drag empty / Space to pan · Undo Ctrl+Z</p>
     </footer>
   </div>
 
   <div id="dragGhost" class="drag-ghost" hidden></div>
-  <script type="module" src="app.js?v=18"></script>
+  <script type="module" src="app.js?v=19"></script>
 </body>
 </html>

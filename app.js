@@ -7,15 +7,24 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=18";
+} from "./stitcher.js?v=19";
+
+/** Shown in the UI — bump with every Pages deploy */
+const APP_VERSION = "19";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
 const thumbs = document.getElementById("thumbs");
 const photoRail = document.getElementById("photoRail");
 const railInner = photoRail.querySelector(".rail-inner");
+const workColumn = document.querySelector(".work-column");
 const statusEl = document.getElementById("status");
 const countsEl = document.getElementById("counts");
+const appVersionEl = document.getElementById("appVersion");
+const appVersionFooter = document.getElementById("appVersionFooter");
+if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
+if (appVersionFooter) appVersionFooter.textContent = `v${APP_VERSION}`;
+document.title = `PhotoStitch v${APP_VERSION}`;
 const clearBtn = document.getElementById("clearBtn");
 const undoBtn = document.getElementById("undoBtn");
 const downloadBtn = document.getElementById("downloadBtn");
@@ -901,7 +910,8 @@ function setLiveConf(score, weakArea = false) {
 function paneAtPoint(clientX, clientY) {
   for (const id of /** @type {const} */ (["a", "b"])) {
     if (id === "b" && !workspaceBVisible) continue;
-    const rect = panes[id].wrap.getBoundingClientRect();
+    // Use the full work-pane (not only the canvas wrap) so empty space counts
+    const rect = panes[id].el.getBoundingClientRect();
     if (
       clientX >= rect.left &&
       clientX <= rect.right &&
@@ -911,7 +921,33 @@ function paneAtPoint(clientX, clientY) {
       return id;
     }
   }
+  // Fallback: anywhere in the right work column → A when B is hidden
+  if (workColumn) {
+    const r = workColumn.getBoundingClientRect();
+    if (
+      clientX >= r.left &&
+      clientX <= r.right &&
+      clientY >= r.top &&
+      clientY <= r.bottom
+    ) {
+      if (!workspaceBVisible) return "a";
+      const mid = (panes.a.el.getBoundingClientRect().bottom + panes.b.el.getBoundingClientRect().top) / 2;
+      return clientY < mid ? "a" : "b";
+    }
+  }
   return null;
+}
+
+/** Left strip of the rail only (collapsed width) — for reorder / return, not the overlay. */
+function overRailColumn(clientX, clientY) {
+  const rect = photoRail.getBoundingClientRect();
+  const collapsed = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rail-collapsed")) || 76;
+  return (
+    clientX >= rect.left &&
+    clientX <= rect.left + collapsed + 8 &&
+    clientY >= rect.top &&
+    clientY <= rect.bottom
+  );
 }
 
 function prepareDragBase(paneId, movingIndex = -1) {
@@ -1109,8 +1145,19 @@ function clearDropHighlights() {
 }
 
 function thumbAtPoint(clientX, clientY) {
-  const el = document.elementFromPoint(clientX, clientY);
-  return el?.closest?.(".thumb-wrap") || null;
+  // Geometry-based so reorder still works when the rail has pointer-events:none
+  for (const wrap of thumbs.querySelectorAll(".thumb-wrap")) {
+    const r = wrap.getBoundingClientRect();
+    if (
+      clientX >= r.left &&
+      clientX <= r.right &&
+      clientY >= r.top &&
+      clientY <= r.bottom
+    ) {
+      return wrap;
+    }
+  }
+  return null;
 }
 
 function autoScrollRail(clientY) {
@@ -1153,12 +1200,13 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
   }
 
   const captureEl = originEl || e.currentTarget;
-  try {
-    captureEl?.setPointerCapture?.(e.pointerId);
-  } catch (_) {}
+  // Do not setPointerCapture on the thumb — it keeps the gesture tied to the rail
+  // and makes montage drops unreliable. Window listeners handle move/up.
 
   const loadedIdx = loaded.findIndex((l) => l.id === fromId);
   let lastHover = null;
+  /** @type {"a" | "b" | null} */
+  let dragLastPane = null;
   const canLiveSnap = !lockedIds.has(fromId);
 
   document.body.classList.add("dragging-tile");
@@ -1171,13 +1219,13 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
     if (!dragMoved) return;
 
     captureEl?.classList?.add("drag-source");
+    // Expanded rail overlays the montage — disable hit-testing for the whole drag
+    photoRail.style.pointerEvents = "none";
     autoScrollRail(ev.clientY);
 
     const overPane = paneAtPoint(ev.clientX, ev.clientY);
-    // Collapse left rail only once the drag has crossed into a montage pane
+    if (overPane) dragLastPane = overPane;
     document.body.classList.toggle("dragging-over-work", Boolean(overPane));
-    // Let drops hit the montage under the expanded rail overlay
-    photoRail.style.pointerEvents = overPane ? "none" : "";
     for (const p of Object.values(panes)) {
       p.el.classList.toggle("drop-hot", p.id === overPane);
     }
@@ -1187,7 +1235,6 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
         dragTargetPane = overPane;
         setFocusedPane(overPane);
         prepareDragBase(overPane, index);
-        // Keep zoom as-is — do not auto-zoom on drag enter
       }
 
       if (dragBaseCanvas) {
@@ -1201,7 +1248,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
         return;
       }
 
-      // Empty pane (or sole-tile group lifted): show ghost at grab point
+      // Empty pane: ghost follows grab point
       dragGhost.hidden = false;
       dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
       const size = Math.min(200, Math.max(100, tiles[index].width * panes[overPane].zoom * 0.35));
@@ -1211,7 +1258,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
       dragGhost.style.left = `${ev.clientX - dragGrab.x * gScale}px`;
       dragGhost.style.top = `${ev.clientY - dragGrab.y * gScale}px`;
       hideLiveConf();
-      setStatus(`Drop to start / place in Workspace ${overPane.toUpperCase()}.`, "busy");
+      setStatus(`Drop to place in Workspace ${overPane.toUpperCase()}.`, "busy");
       return;
     }
 
@@ -1267,35 +1314,29 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
       return;
     }
 
-    // Prefer montage placement whenever the pointer is over a workspace
-    // (expanded rail can overlap the left edge of the wrap)
-    const overPane = paneAtPoint(ev.clientX, ev.clientY);
+    // Prefer montage — last pane under cursor during drag as fallback
+    const overPane = paneAtPoint(ev.clientX, ev.clientY) || dragLastPane;
     if (overPane) {
       setFocusedPane(overPane);
-      const rect = panes[overPane].canvas.getBoundingClientRect();
+      const target = panes[overPane];
+      const rect = (target.canvas.width ? target.canvas : target.wrap).getBoundingClientRect();
+      setStatus(`Placing in Workspace ${overPane.toUpperCase()}…`, "busy");
       finishDragPlace(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
         clearMontageDragPreview();
       });
       return;
     }
 
-    const thumbsRect = thumbs.getBoundingClientRect();
+    const inRail = overRailColumn(ev.clientX, ev.clientY);
+    const hover = thumbAtPoint(ev.clientX, ev.clientY);
     const dropRect = drop.getBoundingClientRect();
-    const overThumbs =
-      ev.clientX >= thumbsRect.left &&
-      ev.clientX <= thumbsRect.right &&
-      ev.clientY >= thumbsRect.top &&
-      ev.clientY <= thumbsRect.bottom;
     const overDropZone =
       ev.clientX >= dropRect.left &&
       ev.clientX <= dropRect.right &&
       ev.clientY >= dropRect.top &&
       ev.clientY <= dropRect.bottom;
 
-    const hover = thumbAtPoint(ev.clientX, ev.clientY);
-
-    // Return placed tile to rail when dropped on drop-zone or empty rail
-    if (tileGroup.has(i) && (overDropZone || (overThumbs && !hover))) {
+    if (tileGroup.has(i) && (overDropZone || (inRail && !hover))) {
       clearMontageDragPreview();
       unplaceByIds([fromId]);
       setStatus(`Returned “${tiles[i]?.name || fromId}” to the left rail.`);
@@ -1305,7 +1346,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
       return;
     }
 
-    if (overThumbs || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
+    if (inRail || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
       clearMontageDragPreview();
       refreshAllPreviews();
       const beforeId = hover && hover.dataset.id !== fromId ? hover.dataset.id : null;
@@ -1313,7 +1354,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
         selection = selection.filter((id) => loaded.some((l) => l.id === id));
         renderThumbs();
         updateCounts();
-        setStatus("Shuffled. Click two to match, or drag onto a workspace.");
+        setStatus("Shuffled. Drag onto the workspace to place.");
       }
       setTimeout(() => {
         dragMoved = false;
@@ -1323,7 +1364,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
 
     clearMontageDragPreview();
     refreshAllPreviews();
-    setStatus("Drop on a workspace to place, or on the left rail to return / shuffle.");
+    setStatus("Drop on the workspace (right) to place, or on the left rail to shuffle.");
     setTimeout(() => {
       dragMoved = false;
     }, 0);
