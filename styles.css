@@ -167,33 +167,41 @@ button:not(:disabled):hover {
   border-color: rgba(240, 160, 144, 0.45);
 }
 
-/* —— Main grid: rail + work —— */
+/* —— Main grid: rail + work (rail expands as overlay; montage stays put) —— */
 .workspace-grid {
   display: grid;
   grid-template-columns: var(--rail-collapsed) 1fr;
   gap: 0.65rem;
   min-height: 0;
   height: 100%;
-  transition: grid-template-columns 0.28s ease;
-}
-
-body:not(.dragging-work) .workspace-grid:has(.photo-rail:hover),
-body.rail-pinned .workspace-grid {
-  grid-template-columns: var(--rail-expanded) 1fr;
-}
-
-body.dragging-work .workspace-grid {
-  grid-template-columns: var(--rail-collapsed) 1fr;
+  /* Keep columns fixed so the work column never shifts */
+  overflow: visible;
 }
 
 .photo-rail {
   position: relative;
+  justify-self: start;
+  width: var(--rail-collapsed);
+  min-width: var(--rail-collapsed);
   min-height: 0;
+  height: 100%;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: rgba(15, 26, 20, 0.72);
+  background: rgba(15, 26, 20, 0.92);
   overflow: hidden;
-  z-index: 5;
+  z-index: 20;
+  transition: width 0.28s ease, box-shadow 0.28s ease;
+}
+
+body:not(.dragging-work) .photo-rail:hover,
+body.rail-pinned .photo-rail {
+  width: var(--rail-expanded);
+  box-shadow: 12px 0 28px rgba(0, 0, 0, 0.4);
+}
+
+body.dragging-work .photo-rail {
+  width: var(--rail-collapsed);
+  box-shadow: none;
 }
 
 .rail-inner {
@@ -596,16 +604,17 @@ footer p {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(180px, 32vh) 1fr;
     height: auto;
+    overflow: visible;
   }
 
-  body:not(.dragging-work) .workspace-grid:has(.photo-rail:hover),
-  body.rail-pinned .workspace-grid,
-  body.dragging-work .workspace-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .photo-rail {
+  .photo-rail,
+  body:not(.dragging-work) .photo-rail:hover,
+  body.rail-pinned .photo-rail,
+  body.dragging-work .photo-rail {
+    width: 100%;
+    min-width: 0;
     max-height: 32vh;
+    box-shadow: none;
   }
 
   .thumbs {
