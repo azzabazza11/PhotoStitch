@@ -7,9 +7,10 @@ Browser-only tool that stitches overlapping screenshots (e.g. Google Maps / sate
 ## Use it
 
 1. Open [index.html](index.html) locally, or the GitHub Pages URL.
-2. Drop PNG/JPEG screenshots (same zoom, generous overlap).
-3. Tune **Crop edges** with the hatched preview until map UI chrome is discarded.
-4. Join tiles with either method:
+2. Drop PNG/JPEG screenshots into the **left photo rail** (hover to expand; collapses while you drag into a workspace).
+3. Tune **Crop** with the hatched preview until map UI chrome is discarded.
+4. Use **Workspace A** (above) and **Workspace B** (below) for two montages at once. Click a pane to focus it; scroll wheel zooms. **Download** exports the focused pane.
+5. Join tiles with either method:
 
 ### Click pair
 
@@ -17,10 +18,9 @@ Click two thumbs you know overlap. The app matches **only that pair**, shows a d
 
 ### Drag snap
 
-Drag a free thumb onto the montage, rough-align where it belongs, release. The app **snaps locally** around your drop. Accept, or drag again for a better snap.
+Drag a free thumb onto a workspace, rough-align where it belongs, release. The app **snaps locally** around your drop. Accept, or drag again for a better snap.
 
-5. Placed tiles show group badges (`G1`, …). Keep attaching free tiles to a group, or merge groups by click-pairing one tile from each.
-6. **Download PNG**.
+6. Placed tiles show group badges (`G1`, …). Keep attaching free tiles, or merge groups by click-pairing one tile from each.
 
 ### Tips
 

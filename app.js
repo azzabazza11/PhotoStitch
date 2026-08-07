@@ -6,11 +6,13 @@ import {
   scoreOverlapAt,
   paintAgreementOverlay,
   compositeMontage,
-} from "./stitcher.js?v=6";
+} from "./stitcher.js?v=7";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
 const thumbs = document.getElementById("thumbs");
+const photoRail = document.getElementById("photoRail");
+const railInner = photoRail.querySelector(".rail-inner");
 const statusEl = document.getElementById("status");
 const countsEl = document.getElementById("counts");
 const clearBtn = document.getElementById("clearBtn");
@@ -20,8 +22,6 @@ const cropInput = document.getElementById("crop");
 const thresholdInput = document.getElementById("threshold");
 const thresholdOut = document.getElementById("thresholdOut");
 const scaleSelect = document.getElementById("scale");
-const preview = document.getElementById("preview");
-const previewWrap = document.getElementById("previewWrap");
 const cropPreview = document.getElementById("cropPreview");
 const cropCanvas = document.getElementById("cropCanvas");
 const reviewBar = document.getElementById("reviewBar");
@@ -32,6 +32,38 @@ const dragGhost = document.getElementById("dragGhost");
 const liveConf = document.getElementById("liveConf");
 const liveConfFill = document.getElementById("liveConfFill");
 const liveConfValue = document.getElementById("liveConfValue");
+
+const panes = {
+  a: {
+    id: "a",
+    el: document.getElementById("paneA"),
+    wrap: document.getElementById("previewWrapA"),
+    stage: document.getElementById("stageA"),
+    canvas: document.getElementById("previewA"),
+    zoomEl: document.getElementById("zoomA"),
+    zoom: 1,
+    /** @type {string | null} */
+    groupId: null,
+    /** @type {HTMLCanvasElement | null} */
+    result: null,
+  },
+  b: {
+    id: "b",
+    el: document.getElementById("paneB"),
+    wrap: document.getElementById("previewWrapB"),
+    stage: document.getElementById("stageB"),
+    canvas: document.getElementById("previewB"),
+    zoomEl: document.getElementById("zoomB"),
+    zoom: 1,
+    /** @type {string | null} */
+    groupId: null,
+    /** @type {HTMLCanvasElement | null} */
+    result: null,
+  },
+};
+
+/** @type {"a" | "b"} */
+let focusedPane = "a";
 
 /** @type {{ id: string, file: File, url: string, img: HTMLImageElement }[]} */
 let loaded = [];
@@ -46,11 +78,8 @@ let groups = new Map();
 /** @type {Map<number, string>} tileIndex -> groupId */
 let tileGroup = new Map();
 let nextGroup = 1;
-/** @type {string | null} */
-let activeGroupId = null;
 
-/** Undo stack of placement snapshots (by tile id). */
-/** @type {{ placements: Map<string, { gid: string, dx: number, dy: number }>, nextGroup: number, activeGroupId: string | null }[]} */
+/** @type {{ placements: Map<string, { gid: string, dx: number, dy: number }>, nextGroup: number, paneGroups: { a: string | null, b: string | null } }[]} */
 let history = [];
 
 /** @type {string[]} selected loaded ids (max 2 for click-pair) */
@@ -66,12 +95,12 @@ let selection = [];
  *   weak?: boolean,
  *   targetGroupId: string | null,
  *   mergeGroupId: string | null,
+ *   mergeDelta?: { dx: number, dy: number },
+ *   paneId: "a" | "b",
  * }}
  */
 let pending = null;
 
-/** @type {HTMLCanvasElement | null} */
-let resultCanvas = null;
 let busy = false;
 
 /** Drag state */
@@ -82,9 +111,12 @@ let pointerId = null;
 let dragBaseCanvas = null;
 /** @type {{ minX: number, minY: number } | null} */
 let dragBaseOrigin = null;
+/** @type {"a" | "b" | null} */
+let dragTargetPane = null;
 let dragScoreTimer = 0;
 /** @type {HTMLCanvasElement | null} */
 let agreementCanvas = null;
+let railScrollRaf = 0;
 
 thresholdInput.addEventListener("input", () => {
   thresholdOut.textContent = Number(thresholdInput.value).toFixed(2);
@@ -106,10 +138,59 @@ function opts() {
   };
 }
 
+function pane(id = focusedPane) {
+  return panes[id];
+}
+
+function setFocusedPane(id, { fit = false } = {}) {
+  focusedPane = id;
+  for (const p of Object.values(panes)) {
+    p.el.classList.toggle("focused", p.id === id);
+  }
+  if (fit) fitPaneZoom(id);
+  updateButtons();
+}
+
+function applyPaneZoom(id) {
+  const p = panes[id];
+  p.stage.style.transform = `scale(${p.zoom})`;
+  p.zoomEl.textContent = `${Math.round(p.zoom * 100)}%`;
+}
+
+function fitPaneZoom(id) {
+  const p = panes[id];
+  if (!p.result || !p.result.width) {
+    p.zoom = 1;
+    applyPaneZoom(id);
+    return;
+  }
+  const availW = Math.max(40, p.wrap.clientWidth - 24);
+  const availH = Math.max(40, p.wrap.clientHeight - 24);
+  const sx = availW / p.result.width;
+  const sy = availH / p.result.height;
+  p.zoom = Math.min(1.25, Math.max(0.12, Math.min(sx, sy) * 0.92));
+  applyPaneZoom(id);
+}
+
+function focusZoomOnDrag(id) {
+  const p = panes[id];
+  if (!p.result || !p.result.width) {
+    p.zoom = 1;
+    applyPaneZoom(id);
+    return;
+  }
+  // Prefer larger tiles for matching: aim ~70% of wrap height for typical tile
+  const tileH = tiles[0]?.height || 400;
+  const target = (p.wrap.clientHeight * 0.72) / tileH;
+  p.zoom = Math.min(1.4, Math.max(0.2, target));
+  applyPaneZoom(id);
+}
+
 function updateButtons() {
-  clearBtn.disabled = busy || (loaded.length === 0 && !resultCanvas && history.length === 0);
+  const hasResult = Boolean(pane().result);
+  clearBtn.disabled = busy || (loaded.length === 0 && !hasResult && history.length === 0);
   undoBtn.disabled = busy || history.length === 0;
-  downloadBtn.disabled = busy || !resultCanvas;
+  downloadBtn.disabled = busy || !hasResult;
 }
 
 function updateCounts() {
@@ -117,6 +198,19 @@ function updateCounts() {
   countsEl.textContent = loaded.length
     ? `${loaded.length} loaded · ${placed} placed · ${groups.size} group${groups.size === 1 ? "" : "s"}`
     : "";
+}
+
+function updateThumbSize() {
+  const n = Math.max(1, loaded.length);
+  // Priority: photo size for visibility, balanced with nearby count
+  // Few photos → large; many → still readable but denser
+  let size;
+  if (n <= 4) size = 200;
+  else if (n <= 8) size = 160;
+  else if (n <= 14) size = 130;
+  else if (n <= 22) size = 108;
+  else size = 88;
+  document.documentElement.style.setProperty("--thumb-size", `${size}px`);
 }
 
 function indexById(id) {
@@ -129,27 +223,40 @@ function rebuildTiles() {
     const cropped = cropImage(item.img, cropPx, item.file.name);
     return { ...cropped, id: item.id };
   });
-  // Invalidate groups if crop changed dimensions — clear placements
   groups = new Map();
   tileGroup = new Map();
   nextGroup = 1;
-  activeGroupId = null;
+  panes.a.groupId = null;
+  panes.b.groupId = null;
   pending = null;
   history = [];
   selection = [];
-  refreshPreview();
+  refreshAllPreviews();
   renderThumbs();
+  updateThumbSize();
 }
 
-function showPreviewCanvas(canvas) {
-  const ctx = preview.getContext("2d");
-  preview.width = canvas.width;
-  preview.height = canvas.height;
-  ctx.clearRect(0, 0, preview.width, preview.height);
+function showPreviewOnPane(id, canvas) {
+  const p = panes[id];
+  const ctx = p.canvas.getContext("2d");
+  p.canvas.width = canvas.width;
+  p.canvas.height = canvas.height;
+  ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(canvas, 0, 0);
-  previewWrap.classList.add("has-result");
-  resultCanvas = canvas;
+  p.wrap.classList.add("has-result");
+  p.result = canvas;
+  applyPaneZoom(id);
   updateButtons();
+}
+
+function clearPanePreview(id) {
+  const p = panes[id];
+  p.canvas.width = 0;
+  p.canvas.height = 0;
+  p.wrap.classList.remove("has-result");
+  p.result = null;
+  p.zoom = 1;
+  applyPaneZoom(id);
 }
 
 function largestGroupId() {
@@ -164,38 +271,55 @@ function largestGroupId() {
   return best;
 }
 
-function refreshPreview() {
-  const gid = activeGroupId && groups.has(activeGroupId) ? activeGroupId : largestGroupId();
-  if (!gid) {
-    if (pending) {
-      const abs = pending.abs;
-      const { canvas } = compositeMontage(tiles, abs, pending.pending);
-      showPreviewCanvas(canvas);
+function groupForPane(id) {
+  const p = panes[id];
+  if (p.groupId && groups.has(p.groupId)) return p.groupId;
+  return null;
+}
+
+function refreshPane(id) {
+  const p = panes[id];
+  let gid = groupForPane(id);
+
+  // Pending preview belongs on the pane that owns the proposal
+  if (pending && pending.paneId === id) {
+    if (pending.mergeGroupId && pending.targetGroupId) {
+      const m = new Map(groups.get(pending.targetGroupId) || []);
+      const other = groups.get(pending.mergeGroupId);
+      const delta = pending.mergeDelta;
+      if (other && delta) {
+        for (const [ti, pos] of other) {
+          m.set(ti, { dx: pos.dx + delta.dx, dy: pos.dy + delta.dy });
+        }
+      }
+      const { canvas } = compositeMontage(tiles, m, null);
+      showPreviewOnPane(id, canvas);
       return;
     }
-    preview.width = 0;
-    preview.height = 0;
-    previewWrap.classList.remove("has-result");
-    resultCanvas = null;
+    const abs = pending.abs;
+    const { canvas } = compositeMontage(tiles, abs, pending.pending);
+    showPreviewOnPane(id, canvas);
+    return;
+  }
+
+  if (!gid) {
+    clearPanePreview(id);
     updateButtons();
     return;
   }
+
   const abs = new Map(groups.get(gid));
-  const pend =
-    pending && (pending.targetGroupId === gid || !pending.targetGroupId)
-      ? pending.pending
-      : pending && !pending.targetGroupId
-        ? pending.pending
-        : null;
-  // Always show pending on active preview when proposing into this group or new group from this view
-  let usePending = null;
-  if (pending) {
-    if (!pending.targetGroupId || pending.targetGroupId === gid) {
-      usePending = pending.pending;
-    }
+  const { canvas } = compositeMontage(tiles, abs, null);
+  showPreviewOnPane(id, canvas);
+}
+
+function refreshAllPreviews() {
+  refreshPane("a");
+  refreshPane("b");
+  // Fit empty-ish panes once; keep user zoom on focused if they already zoomed
+  for (const id of /** @type {const} */ (["a", "b"])) {
+    if (panes[id].result) fitPaneZoom(id);
   }
-  const { canvas } = compositeMontage(tiles, abs, usePending);
-  showPreviewCanvas(canvas);
 }
 
 function hideReview() {
@@ -251,7 +375,7 @@ function renderThumbs() {
     wrap.appendChild(meta);
     wrap.title = item.file.name;
 
-    wrap.addEventListener("click", (e) => {
+    wrap.addEventListener("click", () => {
       if (dragMoved) {
         dragMoved = false;
         return;
@@ -279,7 +403,7 @@ function onThumbClick(id) {
   if (selection.includes(id)) {
     selection = selection.filter((x) => x !== id);
     renderThumbs();
-    setStatus(selection.length ? "Select a second image to match." : "Click two images, or drag one onto the montage.");
+    setStatus(selection.length ? "Select a second image to match." : "Click two images, or drag one onto a workspace.");
     return;
   }
 
@@ -288,7 +412,7 @@ function onThumbClick(id) {
   renderThumbs();
 
   if (selection.length === 1) {
-    setStatus("Select a second overlapping image (or drag this one onto the montage).");
+    setStatus("Select a second overlapping image (or drag this one onto a workspace).");
     return;
   }
 
@@ -299,6 +423,8 @@ async function runPairMatch(idA, idB) {
   const iA = indexById(idA);
   const iB = indexById(idB);
   if (iA < 0 || iB < 0) return;
+
+  const paneId = focusedPane;
 
   busy = true;
   updateButtons();
@@ -327,7 +453,6 @@ async function runPairMatch(idA, idB) {
     let pendingPos;
 
     if (!gA && !gB) {
-      // New group: A at origin, B at hit offset
       abs = new Map([[iA, { dx: 0, dy: 0 }]]);
       movingIndex = iB;
       pendingPos = { index: iB, dx: hit.dx, dy: hit.dy };
@@ -339,58 +464,38 @@ async function runPairMatch(idA, idB) {
       pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
       targetGroupId = gA;
     } else if (!gA && gB) {
-      // Attach A using inverse: A origin in B coords = -hit of B in A...
-      // hit is B in A coords. We matched A as ref, B as mov. So B = A_pos + hit.
-      // Here B is placed; we want A. From B = A + hit => A = B - hit.
       abs = new Map(groups.get(gB));
       const bPos = abs.get(iB);
       movingIndex = iA;
       pendingPos = { index: iA, dx: bPos.dx - hit.dx, dy: bPos.dy - hit.dy };
       targetGroupId = gB;
     } else if (gA && gB && gA !== gB) {
-      // Merge gB into gA via link at iA/iB
       abs = new Map(groups.get(gA));
       const aPos = abs.get(iA);
       const bAbs = groups.get(gB);
       const bPos = bAbs.get(iB);
-      // Desired: bPos' = aPos + hit. Shift for all of gB: delta = (aPos+hit) - bPos
       const deltaX = aPos.dx + hit.dx - bPos.dx;
       const deltaY = aPos.dy + hit.dy - bPos.dy;
-      // Preview: show gA + shifted gB as pending isn't one tile — commit on accept by merging
-      for (const [ti, p] of bAbs) {
-        abs.set(ti, { dx: p.dx + deltaX, dy: p.dy + deltaY });
-      }
       movingIndex = iB;
       pendingPos = { index: iB, dx: aPos.dx + hit.dx, dy: aPos.dy + hit.dy };
       targetGroupId = gA;
       mergeGroupId = gB;
-      // Store merge shift on pending via abs already containing both
       pending = {
         movingIndex,
-        abs: new Map(groups.get(gA)), // base only; accept will merge
+        abs: new Map(groups.get(gA)),
         pending: pendingPos,
         score: hit.score,
         edge: hit.edge,
         targetGroupId,
         mergeGroupId,
         mergeDelta: { dx: deltaX, dy: deltaY },
+        paneId,
       };
       selection = [];
-      const { canvas } = compositeMontage(
-        tiles,
-        (() => {
-          const m = new Map(groups.get(gA));
-          for (const [ti, p] of groups.get(gB)) {
-            m.set(ti, { dx: p.dx + deltaX, dy: p.dy + deltaY });
-          }
-          return m;
-        })(),
-        null
-      );
-      showPreviewCanvas(canvas);
-      showReview(
-        `Merge ${gB} → ${gA}? score ${hit.score.toFixed(3)} · ${hit.edge}`
-      );
+      panes[paneId].groupId = gA;
+      refreshAllPreviews();
+      fitPaneZoom(paneId);
+      showReview(`Merge ${gB} → ${gA}? score ${hit.score.toFixed(3)} · ${hit.edge}`);
       setStatus(`Merge groups via ${tiles[iA].name} + ${tiles[iB].name}`, "busy");
       renderThumbs();
       return;
@@ -409,13 +514,13 @@ async function runPairMatch(idA, idB) {
       edge: hit.edge,
       targetGroupId,
       mergeGroupId: null,
+      paneId,
     };
     selection = [];
-    activeGroupId = targetGroupId;
-    refreshPreview();
-    showReview(
-      `Join “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}`
-    );
+    if (targetGroupId) panes[paneId].groupId = targetGroupId;
+    refreshAllPreviews();
+    fitPaneZoom(paneId);
+    showReview(`Join “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}`);
     setStatus("Accept to lock this join, or Reject to try another pair.", "busy");
     renderThumbs();
   } finally {
@@ -428,6 +533,7 @@ function acceptPending() {
   if (!pending) return;
   pushHistory();
   const p = pending;
+  const paneId = p.paneId || focusedPane;
 
   if (p.mergeGroupId && p.targetGroupId) {
     const target = groups.get(p.targetGroupId);
@@ -438,24 +544,28 @@ function acceptPending() {
       tileGroup.set(ti, p.targetGroupId);
     }
     groups.delete(p.mergeGroupId);
-    activeGroupId = p.targetGroupId;
+    for (const pan of Object.values(panes)) {
+      if (pan.groupId === p.mergeGroupId) pan.groupId = p.targetGroupId;
+    }
+    panes[paneId].groupId = p.targetGroupId;
   } else if (!p.targetGroupId) {
     const gid = `G${nextGroup++}`;
     const abs = new Map(p.abs);
     abs.set(p.pending.index, { dx: p.pending.dx, dy: p.pending.dy });
     groups.set(gid, abs);
     for (const ti of abs.keys()) tileGroup.set(ti, gid);
-    activeGroupId = gid;
+    panes[paneId].groupId = gid;
   } else {
     const abs = groups.get(p.targetGroupId);
     abs.set(p.pending.index, { dx: p.pending.dx, dy: p.pending.dy });
     tileGroup.set(p.pending.index, p.targetGroupId);
-    activeGroupId = p.targetGroupId;
+    panes[paneId].groupId = p.targetGroupId;
   }
 
   pending = null;
   hideReview();
-  refreshPreview();
+  refreshAllPreviews();
+  fitPaneZoom(paneId);
   renderThumbs();
   updateCounts();
   updateButtons();
@@ -467,14 +577,11 @@ function rejectPending() {
   pending = null;
   hideReview();
   selection = [];
-  refreshPreview();
+  refreshAllPreviews();
   renderThumbs();
-  setStatus("Rejected. Click two images or drag a free tile onto the montage.");
+  setStatus("Rejected. Click two images or drag a free tile onto a workspace.");
 }
 
-/**
- * Capture placements keyed by tile id so we can rebuild after reordering / undo.
- */
 function snapshotPlacementsById() {
   /** @type {Map<string, { gid: string, dx: number, dy: number }>} */
   const placements = new Map();
@@ -508,7 +615,7 @@ function pushHistory() {
   history.push({
     placements: clone,
     nextGroup,
-    activeGroupId,
+    paneGroups: { a: panes.a.groupId, b: panes.b.groupId },
   });
   if (history.length > 80) history.shift();
   updateButtons();
@@ -522,13 +629,14 @@ function undoLast() {
   }
   const snap = history.pop();
   nextGroup = snap.nextGroup;
-  activeGroupId = snap.activeGroupId;
+  panes.a.groupId = snap.paneGroups.a;
+  panes.b.groupId = snap.paneGroups.b;
   restorePlacementsById(snap.placements);
-  if (activeGroupId && !groups.has(activeGroupId)) {
-    activeGroupId = largestGroupId();
+  for (const pan of Object.values(panes)) {
+    if (pan.groupId && !groups.has(pan.groupId)) pan.groupId = null;
   }
   selection = [];
-  refreshPreview();
+  refreshAllPreviews();
   renderThumbs();
   updateCounts();
   updateButtons();
@@ -560,9 +668,6 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-/**
- * Move tile `fromId` so it sits before `beforeId` (or at end if beforeId is null).
- */
 function reorderThumbs(fromId, beforeId) {
   if (fromId === beforeId) return false;
   const from = loaded.findIndex((l) => l.id === fromId);
@@ -625,11 +730,26 @@ function setLiveConf(score, weakArea = false) {
   }
   if (pct >= 80) liveConfFill.classList.add("ok");
   else if (pct >= 55) liveConfFill.classList.add("mid");
-  liveConfValue.textContent = `${(score).toFixed(2)}`;
+  liveConfValue.textContent = `${score.toFixed(2)}`;
 }
 
-function prepareDragBase() {
-  const gid = activeGroupId && groups.has(activeGroupId) ? activeGroupId : largestGroupId();
+function paneAtPoint(clientX, clientY) {
+  for (const id of /** @type {const} */ (["a", "b"])) {
+    const rect = panes[id].wrap.getBoundingClientRect();
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      return id;
+    }
+  }
+  return null;
+}
+
+function prepareDragBase(paneId) {
+  const gid = groupForPane(paneId);
   if (!gid) {
     dragBaseCanvas = null;
     dragBaseOrigin = null;
@@ -641,32 +761,37 @@ function prepareDragBase() {
   return gid;
 }
 
-/**
- * Full-scale alpha blend + throttled confidence while hovering over montage.
- */
-function updateMontageDragPreview(movingIndex, clientX, clientY) {
+function canvasPointerToLocal(p, clientX, clientY) {
+  const rect = p.canvas.getBoundingClientRect();
+  if (rect.width < 8 || rect.height < 8) return null;
+  const scaleX = p.canvas.width / rect.width;
+  const scaleY = p.canvas.height / rect.height;
+  return {
+    localX: (clientX - rect.left) * scaleX,
+    localY: (clientY - rect.top) * scaleY,
+    rect,
+  };
+}
+
+function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
+  const p = panes[paneId];
   if (!dragBaseCanvas || !dragBaseOrigin) return false;
-  if (!preview.width) {
-    showPreviewCanvas(dragBaseCanvas);
+  if (!p.canvas.width) {
+    showPreviewOnPane(paneId, dragBaseCanvas);
   }
 
-  const rect = preview.getBoundingClientRect();
-  if (rect.width < 8 || rect.height < 8) return false;
-
-  const scaleX = preview.width / rect.width;
-  const scaleY = preview.height / rect.height;
-  const localX = (clientX - rect.left) * scaleX;
-  const localY = (clientY - rect.top) * scaleY;
+  const mapped = canvasPointerToLocal(p, clientX, clientY);
+  if (!mapped) return false;
+  const { localX, localY } = mapped;
   const drawX = localX - tiles[movingIndex].width / 2;
   const drawY = localY - tiles[movingIndex].height / 2;
 
-  const ctx = preview.getContext("2d");
-  preview.width = dragBaseCanvas.width;
-  preview.height = dragBaseCanvas.height;
-  ctx.clearRect(0, 0, preview.width, preview.height);
+  const ctx = p.canvas.getContext("2d");
+  p.canvas.width = dragBaseCanvas.width;
+  p.canvas.height = dragBaseCanvas.height;
+  ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(dragBaseCanvas, 0, 0);
 
-  // Agreement overlay (from last scored position) under the ghost tile
   if (agreementCanvas) {
     ctx.drawImage(agreementCanvas, 0, 0);
   }
@@ -676,12 +801,12 @@ function updateMontageDragPreview(movingIndex, clientX, clientY) {
   ctx.drawImage(tiles[movingIndex].canvas, drawX, drawY);
   ctx.globalAlpha = 1;
   ctx.strokeStyle = "rgba(196, 232, 106, 0.95)";
-  ctx.lineWidth = Math.max(2, Math.round(Math.min(preview.width, preview.height) / 250));
+  ctx.lineWidth = Math.max(2, Math.round(Math.min(p.canvas.width, p.canvas.height) / 250));
   ctx.setLineDash([8, 5]);
   ctx.strokeRect(drawX + 1, drawY + 1, tiles[movingIndex].width - 2, tiles[movingIndex].height - 2);
   ctx.restore();
 
-  previewWrap.classList.add("has-result");
+  p.wrap.classList.add("has-result");
 
   const now = performance.now();
   if (now - dragScoreTimer < 120) return true;
@@ -718,6 +843,8 @@ function clearMontageDragPreview() {
   dragBaseCanvas = null;
   dragBaseOrigin = null;
   dragScoreTimer = 0;
+  dragTargetPane = null;
+  for (const p of Object.values(panes)) p.el.classList.remove("drop-hot");
 }
 
 function clearDropHighlights() {
@@ -732,11 +859,22 @@ function thumbAtPoint(clientX, clientY) {
   return el?.closest?.(".thumb-wrap") || null;
 }
 
+function autoScrollRail(clientY) {
+  const rect = railInner.getBoundingClientRect();
+  const edge = 48;
+  let dy = 0;
+  if (clientY < rect.top + edge) dy = -Math.ceil((edge - (clientY - rect.top)) / 4);
+  else if (clientY > rect.bottom - edge) dy = Math.ceil((edge - (rect.bottom - clientY)) / 4);
+  if (!dy) return;
+  if (railScrollRaf) return;
+  railScrollRaf = requestAnimationFrame(() => {
+    railInner.scrollTop += dy;
+    railScrollRaf = 0;
+  });
+}
+
 function startDrag(e, index) {
   if (busy) return;
-  if (pending && pending.movingIndex !== index && tileGroup.has(index)) {
-    // Still allow reorder of other placed tiles while a proposal is open
-  }
 
   const fromId = tiles[index].id;
   dragIndex = index;
@@ -751,46 +889,67 @@ function startDrag(e, index) {
   let lastHover = null;
   const canLiveSnap =
     !tileGroup.has(index) || (pending && pending.movingIndex === index);
-  if (canLiveSnap) prepareDragBase();
+
+  document.body.classList.add("dragging-work");
 
   const onMove = (ev) => {
     if (ev.pointerId !== pointerId) return;
-    if (
-      Math.abs(ev.clientX - e.clientX) + Math.abs(ev.clientY - e.clientY) > 6
-    ) {
+    if (Math.abs(ev.clientX - e.clientX) + Math.abs(ev.clientY - e.clientY) > 6) {
       dragMoved = true;
     }
     if (!dragMoved) return;
 
     originEl.classList.add("drag-source");
+    autoScrollRail(ev.clientY);
 
-    const previewRect = previewWrap.getBoundingClientRect();
-    const overPreview =
-      canLiveSnap &&
-      dragBaseCanvas &&
-      ev.clientX >= previewRect.left &&
-      ev.clientX <= previewRect.right &&
-      ev.clientY >= previewRect.top &&
-      ev.clientY <= previewRect.bottom;
+    const overPane = paneAtPoint(ev.clientX, ev.clientY);
+    for (const p of Object.values(panes)) {
+      p.el.classList.toggle("drop-hot", p.id === overPane);
+    }
 
-    if (overPreview) {
-      dragGhost.hidden = true;
-      thumbs.classList.remove("reorder-active");
-      if (lastHover) {
-        lastHover.classList.remove("drop-target");
-        lastHover = null;
+    if (overPane && canLiveSnap) {
+      if (dragTargetPane !== overPane) {
+        dragTargetPane = overPane;
+        setFocusedPane(overPane);
+        prepareDragBase(overPane);
+        focusZoomOnDrag(overPane);
       }
-      updateMontageDragPreview(index, ev.clientX, ev.clientY);
+
+      if (dragBaseCanvas) {
+        dragGhost.hidden = true;
+        thumbs.classList.remove("reorder-active");
+        if (lastHover) {
+          lastHover.classList.remove("drop-target");
+          lastHover = null;
+        }
+        updateMontageDragPreview(index, ev.clientX, ev.clientY, overPane);
+        return;
+      }
+
+      // Empty pane: show ghost, ready to seed
+      dragGhost.hidden = false;
+      dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
+      const size = Math.min(200, Math.max(100, tiles[index].width * panes[overPane].zoom * 0.35));
+      dragGhost.style.width = `${size}px`;
+      dragGhost.style.height = `${size}px`;
+      dragGhost.style.left = `${ev.clientX - size / 2}px`;
+      dragGhost.style.top = `${ev.clientY - size / 2}px`;
+      hideLiveConf();
+      setStatus(`Drop to start a montage in Workspace ${overPane.toUpperCase()}.`, "busy");
       return;
     }
 
-    hideLiveConf();
-    // Restore base montage under cursor when leaving preview mid-drag
-    if (dragBaseCanvas && preview.width) {
-      const ctx = preview.getContext("2d");
-      ctx.clearRect(0, 0, preview.width, preview.height);
-      ctx.drawImage(dragBaseCanvas, 0, 0);
+    // Left preview mid-drag — restore base on last target
+    if (dragTargetPane && dragBaseCanvas) {
+      const prev = panes[dragTargetPane];
+      if (prev.canvas.width) {
+        const ctx = prev.canvas.getContext("2d");
+        ctx.clearRect(0, 0, prev.canvas.width, prev.canvas.height);
+        ctx.drawImage(dragBaseCanvas, 0, 0);
+      }
     }
+    hideLiveConf();
+    dragTargetPane = null;
 
     dragGhost.hidden = false;
     dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
@@ -820,6 +979,7 @@ function startDrag(e, index) {
     dragGhost.hidden = true;
     clearDropHighlights();
     hideLiveConf();
+    document.body.classList.remove("dragging-work");
 
     const i = dragIndex;
     dragIndex = null;
@@ -840,13 +1000,13 @@ function startDrag(e, index) {
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
     if (overThumbs || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
       clearMontageDragPreview();
-      refreshPreview();
+      refreshAllPreviews();
       const beforeId = hover && hover.dataset.id !== fromId ? hover.dataset.id : null;
       if (reorderThumbs(fromId, beforeId)) {
         selection = selection.filter((id) => loaded.some((l) => l.id === id));
         renderThumbs();
         updateCounts();
-        setStatus("Shuffled. Click two neighbors to match, or drag a free tile onto the montage.");
+        setStatus("Shuffled. Click two neighbors to match, or drag a free tile onto a workspace.");
       }
       setTimeout(() => {
         dragMoved = false;
@@ -854,17 +1014,11 @@ function startDrag(e, index) {
       return;
     }
 
-    const rect = previewWrap.getBoundingClientRect();
-    const overPreview =
-      ev.clientX >= rect.left &&
-      ev.clientX <= rect.right &&
-      ev.clientY >= rect.top &&
-      ev.clientY <= rect.bottom;
-
-    if (overPreview) {
+    const overPane = paneAtPoint(ev.clientX, ev.clientY);
+    if (overPane) {
       if (pending && pending.movingIndex !== i) {
         clearMontageDragPreview();
-        refreshPreview();
+        refreshAllPreviews();
         setStatus("Accept or Reject the current proposal first.", "error");
         setTimeout(() => {
           dragMoved = false;
@@ -873,23 +1027,24 @@ function startDrag(e, index) {
       }
       if (tileGroup.has(i) && !(pending && pending.movingIndex === i)) {
         clearMontageDragPreview();
-        refreshPreview();
-        setStatus("That tile is already placed — drag a free tile onto the montage to snap.", "error");
+        refreshAllPreviews();
+        setStatus("That tile is already placed — drag a free tile onto a workspace to snap.", "error");
         setTimeout(() => {
           dragMoved = false;
         }, 0);
         return;
       }
-      // Keep dragBase for finishDragSnap speed — cleared after
-      finishDragSnap(i, ev.clientX, ev.clientY, preview.getBoundingClientRect()).finally(() => {
+      setFocusedPane(overPane);
+      const rect = panes[overPane].canvas.getBoundingClientRect();
+      finishDragSnap(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
         clearMontageDragPreview();
       });
       return;
     }
 
     clearMontageDragPreview();
-    refreshPreview();
-    setStatus("Drop on the thumb strip to shuffle, or on the montage to snap.");
+    refreshAllPreviews();
+    setStatus("Drop on the photo rail to shuffle, or on a workspace to snap.");
     setTimeout(() => {
       dragMoved = false;
     }, 0);
@@ -900,7 +1055,7 @@ function startDrag(e, index) {
   window.addEventListener("pointercancel", onUp);
 }
 
-async function finishDragSnap(movingIndex, clientX, clientY, rect) {
+async function finishDragSnap(movingIndex, clientX, clientY, rect, paneId) {
   busy = true;
   updateButtons();
   setStatus("Snapping…", "busy");
@@ -908,23 +1063,24 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
   try {
     await yieldUi();
 
-    // Ensure there is a base montage — if empty, place this tile as new seed at 0,0 without snap
-    let gid = activeGroupId && groups.has(activeGroupId) ? activeGroupId : largestGroupId();
+    let gid = groupForPane(paneId);
 
     if (!gid) {
-      // Start group with this tile alone — user can then attach others
       pushHistory();
       const newG = `G${nextGroup++}`;
       groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0 }]]));
       tileGroup.set(movingIndex, newG);
-      activeGroupId = newG;
+      panes[paneId].groupId = newG;
       pending = null;
       hideReview();
-      refreshPreview();
+      refreshAllPreviews();
+      fitPaneZoom(paneId);
       renderThumbs();
       updateCounts();
       updateButtons();
-      setStatus(`Started ${newG} with “${tiles[movingIndex].name}”. Undo to remove, or drag another tile onto it.`);
+      setStatus(
+        `Started ${newG} in Workspace ${paneId.toUpperCase()} with “${tiles[movingIndex].name}”. Drag another tile onto it.`
+      );
       return;
     }
 
@@ -936,17 +1092,17 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
     const abs = groups.get(gid);
     const { canvas: montageCanvas, origin } = compositeMontage(tiles, abs, null);
 
-    // Map pointer to montage pixel coords (account for CSS scaling)
-    const scaleX = preview.width / rect.width;
-    const scaleY = preview.height / rect.height;
-    const localX = (clientX - rect.left) * scaleX;
-    const localY = (clientY - rect.top) * scaleY;
+    const p = panes[paneId];
+    // Prefer live canvas rect if available (accounts for zoom)
+    const liveRect = p.canvas.width ? p.canvas.getBoundingClientRect() : rect;
+    const scaleX = (p.canvas.width || montageCanvas.width) / Math.max(1, liveRect.width);
+    const scaleY = (p.canvas.height || montageCanvas.height) / Math.max(1, liveRect.height);
+    const localX = (clientX - liveRect.left) * scaleX;
+    const localY = (clientY - liveRect.top) * scaleY;
 
-    // Drop = center of moving tile roughly under cursor
     const guessDx = origin.minX + localX - tiles[movingIndex].width / 2;
     const guessDy = origin.minY + localY - tiles[movingIndex].height / 2;
 
-    // Snap against composite montage in origin-shifted space: convert guess to montage-local
     const guessInMontage = {
       dx: guessDx - origin.minX,
       dy: guessDy - origin.minY,
@@ -962,6 +1118,7 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
 
     if (!hit) {
       setStatus("Snap failed — try a closer drop or click-pair instead.", "error");
+      refreshAllPreviews();
       return;
     }
 
@@ -977,10 +1134,12 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
       weak: !!hit.weak,
       targetGroupId: gid,
       mergeGroupId: null,
+      paneId,
     };
-    activeGroupId = gid;
+    panes[paneId].groupId = gid;
     selection = [];
-    refreshPreview();
+    refreshAllPreviews();
+    fitPaneZoom(paneId);
     const weakNote = hit.weak ? " (weak — nudge & re-drop if needed)" : "";
     showReview(
       `Snap “${tiles[movingIndex].name}”? score ${hit.score.toFixed(3)} · ${hit.edge}${weakNote}`
@@ -995,7 +1154,6 @@ async function finishDragSnap(movingIndex, clientX, clientY, rect) {
   } finally {
     busy = false;
     updateButtons();
-    // Keep dragMoved true until click handler consumes it
     setTimeout(() => {
       dragMoved = false;
     }, 0);
@@ -1012,8 +1170,8 @@ function updateCropPreview() {
   const c = effectiveCrop(item.img.width, item.img.height, cropPx);
   const srcW = item.img.width;
   const srcH = item.img.height;
-  const maxW = 420;
-  const maxH = 260;
+  const maxW = 320;
+  const maxH = 180;
   const scale = Math.min(maxW / srcW, maxH / srcH, 1);
   const dw = Math.round(srcW * scale);
   const dh = Math.round(srcH * scale);
@@ -1076,7 +1234,7 @@ async function addFiles(files) {
   updateCropPreview();
   updateCounts();
   updateButtons();
-  setStatus("Click two overlapping shots, or drag a free tile onto the montage.");
+  setStatus("Click two overlapping shots, or drag a free tile onto a workspace.");
 }
 
 function clearAll() {
@@ -1086,17 +1244,17 @@ function clearAll() {
   groups = new Map();
   tileGroup = new Map();
   nextGroup = 1;
-  activeGroupId = null;
+  panes.a.groupId = null;
+  panes.b.groupId = null;
   pending = null;
   history = [];
   selection = [];
-  resultCanvas = null;
-  preview.width = 0;
-  preview.height = 0;
-  previewWrap.classList.remove("has-result");
+  clearPanePreview("a");
+  clearPanePreview("b");
   cropPreview.hidden = true;
   hideReview();
   renderThumbs();
+  updateThumbSize();
   updateCounts();
   updateButtons();
   setStatus("Waiting for images.");
@@ -1104,8 +1262,9 @@ function clearAll() {
 }
 
 function downloadPng() {
-  if (!resultCanvas) return;
-  resultCanvas.toBlob((blob) => {
+  const p = pane();
+  if (!p.result) return;
+  p.result.toBlob((blob) => {
     if (!blob) {
       setStatus("Could not export PNG.", "error");
       return;
@@ -1113,7 +1272,7 @@ function downloadPng() {
     const a = document.createElement("a");
     const url = URL.createObjectURL(blob);
     a.href = url;
-    a.download = `photostitch-${resultCanvas.width}x${resultCanvas.height}.png`;
+    a.download = `photostitch-${p.id}-${p.result.width}x${p.result.height}.png`;
     a.click();
     URL.revokeObjectURL(url);
   }, "image/png");
@@ -1121,6 +1280,23 @@ function downloadPng() {
 
 function yieldUi() {
   return new Promise((r) => setTimeout(r, 0));
+}
+
+// Pane focus + wheel zoom
+for (const id of /** @type {const} */ (["a", "b"])) {
+  const p = panes[id];
+  p.el.addEventListener("pointerdown", () => setFocusedPane(id));
+  p.wrap.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      setFocusedPane(id);
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      p.zoom = Math.min(3, Math.max(0.08, p.zoom * factor));
+      applyPaneZoom(id);
+    },
+    { passive: false }
+  );
 }
 
 drop.addEventListener("click", () => fileInput.click());
@@ -1154,4 +1330,14 @@ clearBtn.addEventListener("click", clearAll);
 undoBtn.addEventListener("click", undoLast);
 downloadBtn.addEventListener("click", downloadPng);
 
+window.addEventListener("resize", () => {
+  for (const id of /** @type {const} */ (["a", "b"])) {
+    if (panes[id].result) fitPaneZoom(id);
+  }
+});
+
+setFocusedPane("a");
+updateThumbSize();
 updateButtons();
+applyPaneZoom("a");
+applyPaneZoom("b");

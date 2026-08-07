@@ -9,98 +9,127 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=6" />
+  <link rel="stylesheet" href="styles.css?v=7" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
 
-  <header class="top">
-    <p class="brand">PhotoStitch</p>
-    <p class="tag">Shuffle thumbs, click two to match, or drag onto the montage to snap. You choose every join.</p>
-  </header>
-
-  <main>
-    <section class="controls" aria-label="Stitch settings">
-      <label class="field">
-        <span>Crop edges (px)</span>
-        <input id="crop" type="number" min="0" max="400" step="1" value="80" />
-        <small class="field-hint">Trims UI chrome on all four sides — not overlap detection</small>
-      </label>
-      <label class="field">
-        <span>Match confidence</span>
-        <input id="threshold" type="range" min="0.72" max="0.96" step="0.01" value="0.85" />
-        <output id="thresholdOut">0.85</output>
-      </label>
-      <label class="field">
-        <span>Search scale</span>
-        <select id="scale">
-          <option value="0.15">Fast (0.15×)</option>
-          <option value="0.2" selected>Balanced (0.2×)</option>
-          <option value="0.3">Accurate (0.3×)</option>
-        </select>
-      </label>
-      <div class="actions">
-        <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
-        <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
-        <button type="button" id="downloadBtn" class="ghost" disabled>Download PNG</button>
+  <div class="app-shell">
+    <header class="top">
+      <div class="top-text">
+        <p class="brand">PhotoStitch</p>
+        <p class="tag">Photos left · two workspaces right. Hover the rail to browse; drag into a pane to match.</p>
       </div>
-    </section>
+      <section class="controls" aria-label="Stitch settings">
+        <label class="field">
+          <span>Crop</span>
+          <input id="crop" type="number" min="0" max="400" step="1" value="80" />
+        </label>
+        <label class="field">
+          <span>Confidence</span>
+          <input id="threshold" type="range" min="0.72" max="0.96" step="0.01" value="0.85" />
+          <output id="thresholdOut">0.85</output>
+        </label>
+        <label class="field">
+          <span>Scale</span>
+          <select id="scale">
+            <option value="0.15">Fast</option>
+            <option value="0.2" selected>Balanced</option>
+            <option value="0.3">Accurate</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
+          <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
+          <button type="button" id="downloadBtn" class="ghost" disabled>Download</button>
+        </div>
+      </section>
+    </header>
 
-    <section id="cropPreview" class="crop-preview" hidden aria-label="Crop preview">
-      <div class="crop-preview-frame">
-        <canvas id="cropCanvas" width="320" height="200"></canvas>
-        <p class="crop-preview-label">Crop preview — hatched area is discarded before matching</p>
+    <div class="workspace-grid">
+      <aside id="photoRail" class="photo-rail" aria-label="Photo library">
+        <div class="rail-inner">
+          <section
+            id="drop"
+            class="drop rail-drop"
+            tabindex="0"
+            role="button"
+            aria-label="Drop images or click to choose files"
+          >
+            <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple hidden />
+            <div class="drop-inner">
+              <p class="drop-title">Add photos</p>
+              <p class="drop-hint">Drop or click</p>
+            </div>
+          </section>
+
+          <section id="cropPreview" class="crop-preview" hidden aria-label="Crop preview">
+            <canvas id="cropCanvas" width="280" height="160"></canvas>
+          </section>
+
+          <section class="thumbs" id="thumbs" aria-label="Loaded images"></section>
+        </div>
+        <div class="rail-edge" aria-hidden="true"></div>
+      </aside>
+
+      <div class="work-column">
+        <section class="status-row" aria-live="polite">
+          <p id="status">Waiting for images.</p>
+          <p id="counts"></p>
+        </section>
+
+        <section id="reviewBar" class="review-bar" hidden aria-label="Join review">
+          <p id="reviewMsg" class="review-msg">Proposed join — Accept to lock, Reject to try again.</p>
+          <div class="review-actions">
+            <button type="button" id="acceptBtn" class="primary">Accept (A)</button>
+            <button type="button" id="rejectBtn" class="danger">Reject (R)</button>
+          </div>
+        </section>
+
+        <section id="liveConf" class="live-conf" hidden aria-live="polite">
+          <span class="live-conf-label">Alignment</span>
+          <div class="live-conf-track">
+            <div class="live-conf-fill" id="liveConfFill"></div>
+          </div>
+          <span class="live-conf-value" id="liveConfValue">—</span>
+        </section>
+
+        <div class="panes">
+          <section class="work-pane focused" id="paneA" data-pane="a" tabindex="0" aria-label="Workspace A">
+            <header class="pane-head">
+              <span class="pane-title">Workspace A</span>
+              <span class="pane-zoom" id="zoomA">100%</span>
+            </header>
+            <div class="preview-wrap" id="previewWrapA">
+              <div class="preview-stage" id="stageA">
+                <canvas id="previewA"></canvas>
+              </div>
+              <p class="preview-empty" id="emptyA">Drop a photo here to start a montage — or click two thumbs.</p>
+            </div>
+          </section>
+
+          <section class="work-pane" id="paneB" data-pane="b" tabindex="0" aria-label="Workspace B">
+            <header class="pane-head">
+              <span class="pane-title">Workspace B</span>
+              <span class="pane-zoom" id="zoomB">100%</span>
+            </header>
+            <div class="preview-wrap" id="previewWrapB">
+              <div class="preview-stage" id="stageB">
+                <canvas id="previewB"></canvas>
+              </div>
+              <p class="preview-empty" id="emptyB">Second pair / montage — blank until you drop or assign a group here.</p>
+            </div>
+          </section>
+        </div>
       </div>
-    </section>
+    </div>
 
-    <section
-      id="drop"
-      class="drop"
-      tabindex="0"
-      role="button"
-      aria-label="Drop images or click to choose files"
-    >
-      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple hidden />
-      <div class="drop-inner">
-        <p class="drop-title">Drop screenshots here</p>
-        <p class="drop-hint">Shuffle thumbs · click two to match · drag onto montage to snap</p>
-      </div>
-    </section>
+    <footer>
+      <p>Hover left rail to expand photos · collapses while dragging to a workspace · scroll wheel zooms the focused pane · Undo Ctrl+Z</p>
+    </footer>
+  </div>
 
-    <section class="status-row" aria-live="polite">
-      <p id="status">Waiting for images.</p>
-      <p id="counts"></p>
-    </section>
-
-    <section class="thumbs" id="thumbs" aria-label="Loaded images"></section>
-
-    <section id="reviewBar" class="review-bar" hidden aria-label="Join review">
-      <p id="reviewMsg" class="review-msg">Proposed join — Accept to lock, Reject to try again.</p>
-      <div class="review-actions">
-        <button type="button" id="acceptBtn" class="primary">Accept (A)</button>
-        <button type="button" id="rejectBtn" class="danger">Reject (R)</button>
-      </div>
-    </section>
-
-    <section id="liveConf" class="live-conf" hidden aria-live="polite">
-      <span class="live-conf-label">Alignment</span>
-      <div class="live-conf-track">
-        <div class="live-conf-fill" id="liveConfFill"></div>
-      </div>
-      <span class="live-conf-value" id="liveConfValue">—</span>
-    </section>
-
-    <section class="preview-wrap" id="previewWrap" aria-label="Montage preview">
-      <canvas id="preview"></canvas>
-      <p id="previewEmpty" class="preview-empty">Montage appears here. Drag a free tile onto this area to snap.</p>
-      <div id="dragGhost" class="drag-ghost" hidden></div>
-    </section>
-  </main>
-
-  <footer>
-    <p>Runs in your browser. Shuffle thumbs, click a pair, or drag-snap. Undo (Ctrl+Z) unaccepts the last lock.</p>
-  </footer>
-
-  <script type="module" src="app.js?v=6"></script>
+  <div id="dragGhost" class="drag-ghost" hidden></div>
+  <script type="module" src="app.js?v=7"></script>
 </body>
 </html>
