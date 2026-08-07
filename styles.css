@@ -160,6 +160,62 @@ footer {
   display: none;
 }
 
+.live-conf {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: rgba(36, 56, 41, 0.65);
+}
+
+.live-conf[hidden] {
+  display: none;
+}
+
+.live-conf-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.live-conf-track {
+  flex: 1 1 10rem;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(15, 26, 20, 0.8);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.live-conf-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--danger);
+  transition: width 0.08s linear, background 0.15s ease;
+}
+
+.live-conf-fill.ok {
+  background: var(--accent);
+}
+
+.live-conf-fill.mid {
+  background: #e8c547;
+}
+
+.live-conf-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  min-width: 3.5rem;
+  text-align: right;
+  color: var(--ink);
+}
+
 .review-msg {
   margin: 0;
   flex: 1 1 12rem;

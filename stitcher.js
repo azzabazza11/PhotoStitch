@@ -169,6 +169,98 @@ function overlapSimilarity(aGray, aw, ah, bGray, bw, bh, dx, dy) {
   return { score, area, mad, ncc: nccScore };
 }
 
+/**
+ * Fast alignment score at an exact offset (no search).
+ * dx/dy = moving origin in reference canvas coords.
+ * @param {HTMLCanvasElement} refCanvas
+ * @param {{ canvas: HTMLCanvasElement }} moving
+ * @param {number} dx
+ * @param {number} dy
+ */
+export function scoreOverlapAt(refCanvas, moving, dx, dy) {
+  const refFull = toGrayFull(refCanvas);
+  const movFull = toGrayFull(moving.canvas);
+  return overlapSimilarity(
+    refFull.gray,
+    refFull.w,
+    refFull.h,
+    movFull.gray,
+    movFull.w,
+    movFull.h,
+    Math.round(dx),
+    Math.round(dy)
+  );
+}
+
+/**
+ * Paint agreement tint into overlay canvas (same size as ref).
+ * Green-ish where pixels agree, red-ish where they differ — coarse blocks for speed.
+ * @param {HTMLCanvasElement} refCanvas
+ * @param {{ canvas: HTMLCanvasElement }} moving
+ * @param {number} dx
+ * @param {number} dy
+ * @param {HTMLCanvasElement} [target]
+ */
+export function paintAgreementOverlay(refCanvas, moving, dx, dy, target) {
+  const out = target || document.createElement("canvas");
+  out.width = refCanvas.width;
+  out.height = refCanvas.height;
+  const ctx = out.getContext("2d");
+  ctx.clearRect(0, 0, out.width, out.height);
+
+  const refFull = toGrayFull(refCanvas);
+  const movFull = toGrayFull(moving.canvas);
+  dx = Math.round(dx);
+  dy = Math.round(dy);
+
+  const x0 = Math.max(0, dx);
+  const y0 = Math.max(0, dy);
+  const x1 = Math.min(refFull.w, dx + movFull.w);
+  const y1 = Math.min(refFull.h, dy + movFull.h);
+  if (x1 - x0 < 8 || y1 - y0 < 8) return out;
+
+  const block = Math.max(8, Math.floor(Math.min(x1 - x0, y1 - y0) / 24));
+  const img = ctx.createImageData(out.width, out.height);
+
+  for (let by = y0; by < y1; by += block) {
+    for (let bx = x0; bx < x1; bx += block) {
+      const bw = Math.min(block, x1 - bx);
+      const bh = Math.min(block, y1 - by);
+      let sum = 0;
+      let n = 0;
+      const step = Math.max(1, Math.floor(block / 4));
+      for (let y = by; y < by + bh; y += step) {
+        for (let x = bx; x < bx + bw; x += step) {
+          const mx = x - dx;
+          const my = y - dy;
+          if (mx < 0 || my < 0 || mx >= movFull.w || my >= movFull.h) continue;
+          sum += Math.abs(refFull.gray[y * refFull.w + x] - movFull.gray[my * movFull.w + mx]);
+          n++;
+        }
+      }
+      if (!n) continue;
+      const mad = sum / n;
+      // mad 0 → green agree; mad 40+ → red disagree
+      const agree = Math.max(0, Math.min(1, 1 - mad / 40));
+      const r = Math.round(240 * (1 - agree));
+      const g = Math.round(220 * agree);
+      const b = 60;
+      const a = Math.round(90 + 80 * Math.abs(agree - 0.5) * 2);
+      for (let y = by; y < by + bh; y++) {
+        for (let x = bx; x < bx + bw; x++) {
+          const i = (y * out.width + x) * 4;
+          img.data[i] = r;
+          img.data[i + 1] = g;
+          img.data[i + 2] = b;
+          img.data[i + 3] = a;
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
 function searchPatchInBand(ref, patch, tw, th, band, step) {
   const x0 = Math.max(0, band.x0);
   const y0 = Math.max(0, band.y0);

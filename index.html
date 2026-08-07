@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=6" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -82,6 +82,14 @@
       </div>
     </section>
 
+    <section id="liveConf" class="live-conf" hidden aria-live="polite">
+      <span class="live-conf-label">Alignment</span>
+      <div class="live-conf-track">
+        <div class="live-conf-fill" id="liveConfFill"></div>
+      </div>
+      <span class="live-conf-value" id="liveConfValue">—</span>
+    </section>
+
     <section class="preview-wrap" id="previewWrap" aria-label="Montage preview">
       <canvas id="preview"></canvas>
       <p id="previewEmpty" class="preview-empty">Montage appears here. Drag a free tile onto this area to snap.</p>
@@ -93,6 +101,6 @@
     <p>Runs in your browser. Shuffle thumbs, click a pair, or drag-snap. Undo (Ctrl+Z) unaccepts the last lock.</p>
   </footer>
 
-  <script type="module" src="app.js?v=5"></script>
+  <script type="module" src="app.js?v=6"></script>
 </body>
 </html>

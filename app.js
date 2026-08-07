@@ -3,8 +3,10 @@ import {
   effectiveCrop,
   matchTwoTiles,
   snapNearOffset,
+  scoreOverlapAt,
+  paintAgreementOverlay,
   compositeMontage,
-} from "./stitcher.js?v=5";
+} from "./stitcher.js?v=6";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -27,6 +29,9 @@ const reviewMsg = document.getElementById("reviewMsg");
 const acceptBtn = document.getElementById("acceptBtn");
 const rejectBtn = document.getElementById("rejectBtn");
 const dragGhost = document.getElementById("dragGhost");
+const liveConf = document.getElementById("liveConf");
+const liveConfFill = document.getElementById("liveConfFill");
+const liveConfValue = document.getElementById("liveConfValue");
 
 /** @type {{ id: string, file: File, url: string, img: HTMLImageElement }[]} */
 let loaded = [];
@@ -73,6 +78,13 @@ let busy = false;
 let dragIndex = null;
 let dragMoved = false;
 let pointerId = null;
+/** @type {HTMLCanvasElement | null} */
+let dragBaseCanvas = null;
+/** @type {{ minX: number, minY: number } | null} */
+let dragBaseOrigin = null;
+let dragScoreTimer = 0;
+/** @type {HTMLCanvasElement | null} */
+let agreementCanvas = null;
 
 thresholdInput.addEventListener("input", () => {
   thresholdOut.textContent = Number(thresholdInput.value).toFixed(2);
@@ -595,6 +607,119 @@ function reorderThumbs(fromId, beforeId) {
   return true;
 }
 
+function hideLiveConf() {
+  liveConf.hidden = true;
+  liveConfFill.style.width = "0%";
+  liveConfFill.className = "live-conf-fill";
+  liveConfValue.textContent = "—";
+}
+
+function setLiveConf(score, weakArea = false) {
+  liveConf.hidden = false;
+  const pct = Math.round(Math.max(0, Math.min(1, score)) * 100);
+  liveConfFill.style.width = `${pct}%`;
+  liveConfFill.className = "live-conf-fill";
+  if (weakArea) {
+    liveConfValue.textContent = "low overlap";
+    return;
+  }
+  if (pct >= 80) liveConfFill.classList.add("ok");
+  else if (pct >= 55) liveConfFill.classList.add("mid");
+  liveConfValue.textContent = `${(score).toFixed(2)}`;
+}
+
+function prepareDragBase() {
+  const gid = activeGroupId && groups.has(activeGroupId) ? activeGroupId : largestGroupId();
+  if (!gid) {
+    dragBaseCanvas = null;
+    dragBaseOrigin = null;
+    return null;
+  }
+  const { canvas, origin } = compositeMontage(tiles, groups.get(gid), null);
+  dragBaseCanvas = canvas;
+  dragBaseOrigin = origin;
+  return gid;
+}
+
+/**
+ * Full-scale alpha blend + throttled confidence while hovering over montage.
+ */
+function updateMontageDragPreview(movingIndex, clientX, clientY) {
+  if (!dragBaseCanvas || !dragBaseOrigin) return false;
+  if (!preview.width) {
+    showPreviewCanvas(dragBaseCanvas);
+  }
+
+  const rect = preview.getBoundingClientRect();
+  if (rect.width < 8 || rect.height < 8) return false;
+
+  const scaleX = preview.width / rect.width;
+  const scaleY = preview.height / rect.height;
+  const localX = (clientX - rect.left) * scaleX;
+  const localY = (clientY - rect.top) * scaleY;
+  const drawX = localX - tiles[movingIndex].width / 2;
+  const drawY = localY - tiles[movingIndex].height / 2;
+
+  const ctx = preview.getContext("2d");
+  preview.width = dragBaseCanvas.width;
+  preview.height = dragBaseCanvas.height;
+  ctx.clearRect(0, 0, preview.width, preview.height);
+  ctx.drawImage(dragBaseCanvas, 0, 0);
+
+  // Agreement overlay (from last scored position) under the ghost tile
+  if (agreementCanvas) {
+    ctx.drawImage(agreementCanvas, 0, 0);
+  }
+
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.drawImage(tiles[movingIndex].canvas, drawX, drawY);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "rgba(196, 232, 106, 0.95)";
+  ctx.lineWidth = Math.max(2, Math.round(Math.min(preview.width, preview.height) / 250));
+  ctx.setLineDash([8, 5]);
+  ctx.strokeRect(drawX + 1, drawY + 1, tiles[movingIndex].width - 2, tiles[movingIndex].height - 2);
+  ctx.restore();
+
+  previewWrap.classList.add("has-result");
+
+  const now = performance.now();
+  if (now - dragScoreTimer < 120) return true;
+  dragScoreTimer = now;
+
+  const score = scoreOverlapAt(dragBaseCanvas, tiles[movingIndex], drawX, drawY);
+  const weakArea = score.area < 24 * 24;
+  setLiveConf(score.score, weakArea);
+  setStatus(
+    weakArea
+      ? "Drag so the tile overlaps the montage — confidence needs shared pixels."
+      : `Live alignment ${score.score.toFixed(2)} (NCC ${score.ncc.toFixed(2)}) — release to snap.`,
+    "busy"
+  );
+
+  if (!weakArea && score.score > 0.35) {
+    agreementCanvas = paintAgreementOverlay(
+      dragBaseCanvas,
+      tiles[movingIndex],
+      drawX,
+      drawY,
+      agreementCanvas || undefined
+    );
+  } else {
+    agreementCanvas = null;
+  }
+
+  return true;
+}
+
+function clearMontageDragPreview() {
+  hideLiveConf();
+  agreementCanvas = null;
+  dragBaseCanvas = null;
+  dragBaseOrigin = null;
+  dragScoreTimer = 0;
+}
+
 function clearDropHighlights() {
   thumbs.classList.remove("reorder-active");
   for (const el of thumbs.querySelectorAll(".drop-target, .drag-source")) {
@@ -624,6 +749,9 @@ function startDrag(e, index) {
 
   const loadedIdx = loaded.findIndex((l) => l.id === fromId);
   let lastHover = null;
+  const canLiveSnap =
+    !tileGroup.has(index) || (pending && pending.movingIndex === index);
+  if (canLiveSnap) prepareDragBase();
 
   const onMove = (ev) => {
     if (ev.pointerId !== pointerId) return;
@@ -634,6 +762,36 @@ function startDrag(e, index) {
     }
     if (!dragMoved) return;
 
+    originEl.classList.add("drag-source");
+
+    const previewRect = previewWrap.getBoundingClientRect();
+    const overPreview =
+      canLiveSnap &&
+      dragBaseCanvas &&
+      ev.clientX >= previewRect.left &&
+      ev.clientX <= previewRect.right &&
+      ev.clientY >= previewRect.top &&
+      ev.clientY <= previewRect.bottom;
+
+    if (overPreview) {
+      dragGhost.hidden = true;
+      thumbs.classList.remove("reorder-active");
+      if (lastHover) {
+        lastHover.classList.remove("drop-target");
+        lastHover = null;
+      }
+      updateMontageDragPreview(index, ev.clientX, ev.clientY);
+      return;
+    }
+
+    hideLiveConf();
+    // Restore base montage under cursor when leaving preview mid-drag
+    if (dragBaseCanvas && preview.width) {
+      const ctx = preview.getContext("2d");
+      ctx.clearRect(0, 0, preview.width, preview.height);
+      ctx.drawImage(dragBaseCanvas, 0, 0);
+    }
+
     dragGhost.hidden = false;
     dragGhost.style.backgroundImage = `url(${loaded[loadedIdx].url})`;
     const size = 148;
@@ -642,7 +800,6 @@ function startDrag(e, index) {
     dragGhost.style.left = `${ev.clientX - size / 2}px`;
     dragGhost.style.top = `${ev.clientY - size / 2}px`;
 
-    originEl.classList.add("drag-source");
     thumbs.classList.add("reorder-active");
 
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
@@ -662,12 +819,16 @@ function startDrag(e, index) {
     window.removeEventListener("pointercancel", onUp);
     dragGhost.hidden = true;
     clearDropHighlights();
+    hideLiveConf();
 
     const i = dragIndex;
     dragIndex = null;
     pointerId = null;
 
-    if (!dragMoved) return;
+    if (!dragMoved) {
+      clearMontageDragPreview();
+      return;
+    }
 
     const thumbsRect = thumbs.getBoundingClientRect();
     const overThumbs =
@@ -678,6 +839,8 @@ function startDrag(e, index) {
 
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
     if (overThumbs || (hover && hover.dataset.id && hover.dataset.id !== fromId)) {
+      clearMontageDragPreview();
+      refreshPreview();
       const beforeId = hover && hover.dataset.id !== fromId ? hover.dataset.id : null;
       if (reorderThumbs(fromId, beforeId)) {
         selection = selection.filter((id) => loaded.some((l) => l.id === id));
@@ -700,6 +863,8 @@ function startDrag(e, index) {
 
     if (overPreview) {
       if (pending && pending.movingIndex !== i) {
+        clearMontageDragPreview();
+        refreshPreview();
         setStatus("Accept or Reject the current proposal first.", "error");
         setTimeout(() => {
           dragMoved = false;
@@ -707,16 +872,23 @@ function startDrag(e, index) {
         return;
       }
       if (tileGroup.has(i) && !(pending && pending.movingIndex === i)) {
+        clearMontageDragPreview();
+        refreshPreview();
         setStatus("That tile is already placed — drag a free tile onto the montage to snap.", "error");
         setTimeout(() => {
           dragMoved = false;
         }, 0);
         return;
       }
-      finishDragSnap(i, ev.clientX, ev.clientY, preview.getBoundingClientRect());
+      // Keep dragBase for finishDragSnap speed — cleared after
+      finishDragSnap(i, ev.clientX, ev.clientY, preview.getBoundingClientRect()).finally(() => {
+        clearMontageDragPreview();
+      });
       return;
     }
 
+    clearMontageDragPreview();
+    refreshPreview();
     setStatus("Drop on the thumb strip to shuffle, or on the montage to snap.");
     setTimeout(() => {
       dragMoved = false;
