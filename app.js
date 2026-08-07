@@ -4,7 +4,7 @@ import {
   matchTwoTiles,
   snapNearOffset,
   compositeMontage,
-} from "./stitcher.js";
+} from "./stitcher.js?v=3";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
