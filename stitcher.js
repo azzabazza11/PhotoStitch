@@ -1,6 +1,5 @@
 /**
- * Progressive edge-overlap montage stitcher with live preview + optional review.
- * Assumes same zoom / near-identical translation overlaps (e.g. map screenshots).
+ * User-driven pair match + local drag-snap for overlapping screenshots.
  */
 
 const GRAY_WEIGHTS = [0.299, 0.587, 0.114];
@@ -27,11 +26,6 @@ export function cropImage(source, cropPx, name = "image") {
   return { canvas, width: cw, height: ch, name };
 }
 
-/**
- * @param {number} imgW
- * @param {number} imgH
- * @param {number} cropPx
- */
 export function effectiveCrop(imgW, imgH, cropPx) {
   return Math.max(0, Math.min(cropPx, Math.floor(Math.min(imgW, imgH) / 2) - 8));
 }
@@ -72,14 +66,12 @@ function toGrayFull(canvas) {
 
 function nccAt(image, iw, ih, template, tw, th, ox, oy) {
   if (ox < 0 || oy < 0 || ox + tw > iw || oy + th > ih) return -1;
-
   let sumI = 0;
   let sumT = 0;
   let sumII = 0;
   let sumTT = 0;
   let sumIT = 0;
   const n = tw * th;
-
   for (let y = 0; y < th; y++) {
     let ii = (oy + y) * iw + ox;
     let ti = y * tw;
@@ -93,14 +85,12 @@ function nccAt(image, iw, ih, template, tw, th, ox, oy) {
       sumIT += iv * tv;
     }
   }
-
   const meanI = sumI / n;
   const meanT = sumT / n;
   const varI = sumII - n * meanI * meanI;
   const varT = sumTT - n * meanT * meanT;
   if (varI < 1e-3 || varT < 1e-3) return -1;
-  const cov = sumIT - n * meanI * meanT;
-  return cov / Math.sqrt(varI * varT);
+  return (sumIT - n * meanI * meanT) / Math.sqrt(varI * varT);
 }
 
 function extractPatch(gray, w, _h, x, y, tw, th) {
@@ -175,7 +165,6 @@ function overlapSimilarity(aGray, aw, ah, bGray, bw, bh, dx, dy) {
     ncc = (sumAB - count * meanA * meanB) / Math.sqrt(varA * varB);
   }
   const nccScore = Math.max(0, Math.min(1, ncc));
-  // Both must look good — MAD catches wrong joins that NCC can still rate high
   const score = Math.min(madScore, nccScore) * 0.7 + ((madScore + nccScore) / 2) * 0.3;
   return { score, area, mad, ncc: nccScore };
 }
@@ -223,7 +212,6 @@ function edgePatchOrigins(edge, w, h, tw, th) {
   const inset = Math.max(2, Math.floor(Math.min(w, h) * 0.03));
   /** @type {[number, number][]} */
   const pts = [];
-
   if (edge === "left" || edge === "right") {
     const x = edge === "left" ? inset : w - tw - inset;
     for (const y of [
@@ -249,7 +237,6 @@ function edgePatchOrigins(edge, w, h, tw, th) {
       if (y >= 0 && y + th <= h) pts.push([xx, y]);
     }
   }
-
   const seen = new Set();
   return pts.filter(([x, y]) => {
     const k = `${x},${y}`;
@@ -259,30 +246,16 @@ function edgePatchOrigins(edge, w, h, tw, th) {
   });
 }
 
-/** @param {"left"|"right"|"top"|"bottom"} edge */
-function oppositeBand(_edge, refW, refH, _maxOverlapFrac) {
-  // Full-frame search at coarse scale. Edge labels only choose where patches
-  // are sampled on the moving tile — with 30–60% map overlap the true hit
-  // often sits well inside the reference, not only on the far border strip.
-  return { x0: 0, y0: 0, x1: refW, y1: refH };
-}
-
 function median(arr) {
   const s = [...arr].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-/**
- * @param {{ dx: number, dy: number, score: number, edge: string }[]} votes
- * @param {number} tol
- */
 function bestConsensus(votes, tol) {
   if (!votes.length) return null;
-
   /** @type {{ dx: number, dy: number, scores: number[], edges: Set<string>, votes: number }[]} */
   const clusters = [];
-
   for (const v of votes) {
     let hit = null;
     for (const c of clusters) {
@@ -307,16 +280,13 @@ function bestConsensus(votes, tol) {
       });
     }
   }
-
   const pool = clusters.filter((c) => c.votes >= 2);
   if (!pool.length) return null;
-
   pool.sort((a, b) => {
     const medA = median(a.scores) + (a.edges.size > 1 ? 0.03 : 0) + a.votes * 0.01;
     const medB = median(b.scores) + (b.edges.size > 1 ? 0.03 : 0) + b.votes * 0.01;
     return medB - medA || b.votes - a.votes;
   });
-
   const top = pool[0];
   return {
     dx: Math.round(top.dx),
@@ -337,6 +307,7 @@ function refinePairFull(refFull, movFull, dx, dy, radius) {
     [Math.floor(movFull.w * 0.92 - tw), Math.floor(movFull.h * 0.5 - th / 2)],
     [Math.floor(movFull.w * 0.5 - tw / 2), Math.floor(movFull.h * 0.08)],
     [Math.floor(movFull.w * 0.5 - tw / 2), Math.floor(movFull.h * 0.92 - th)],
+    [Math.floor(movFull.w * 0.5 - tw / 2), Math.floor(movFull.h * 0.5 - th / 2)],
   ];
 
   let bestDx = dx;
@@ -351,9 +322,16 @@ function refinePairFull(refFull, movFull, dx, dy, radius) {
         const ppx = Math.max(0, Math.min(movFull.w - tw, px));
         const ppy = Math.max(0, Math.min(movFull.h - th, py));
         const patch = extractPatch(movFull.gray, movFull.w, movFull.h, ppx, ppy, tw, th);
-        const rx = dx + ox + ppx;
-        const ry = dy + oy + ppy;
-        const s = nccAt(refFull.gray, refFull.w, refFull.h, patch, tw, th, rx, ry);
+        const s = nccAt(
+          refFull.gray,
+          refFull.w,
+          refFull.h,
+          patch,
+          tw,
+          th,
+          dx + ox + ppx,
+          dy + oy + ppy
+        );
         if (s >= 0) {
           sum += s;
           n++;
@@ -373,12 +351,34 @@ function refinePairFull(refFull, movFull, dx, dy, radius) {
   return { dx: bestDx, dy: bestDy, score: bestScore };
 }
 
-/**
- * Match moving tile B against reference A.
- * Returns offset of B's origin in A's coordinate system.
- */
+function scoreCandidate(refFull, movFull, dx, dy, patchScore, edge) {
+  const overlap = overlapSimilarity(
+    refFull.gray,
+    refFull.w,
+    refFull.h,
+    movFull.gray,
+    movFull.w,
+    movFull.h,
+    dx,
+    dy
+  );
+  if (overlap.area < 24 * 24) return null;
+  if (overlap.mad > 22) return null;
+  if (overlap.ncc < 0.85) return null;
+  if (overlap.score < 0.78) return null;
+  const finalScore = (patchScore ?? overlap.ncc) * 0.3 + overlap.score * 0.7;
+  if (finalScore < 0.75) return null;
+  return {
+    dx,
+    dy,
+    score: finalScore,
+    patchScore: patchScore ?? overlap.ncc,
+    overlapScore: overlap.score,
+    edge: edge || "local",
+  };
+}
+
 function matchPair(refScaled, movScaled, refFull, movFull, coarseScale) {
-  const maxOverlapFrac = 0.5;
   const tw = Math.min(40, Math.floor(movScaled.w * 0.28), movScaled.w);
   const th = Math.min(40, Math.floor(movScaled.h * 0.28), movScaled.h);
   if (tw < 12 || th < 12) return null;
@@ -387,15 +387,13 @@ function matchPair(refScaled, movScaled, refFull, movFull, coarseScale) {
   const edges = /** @type {const} */ (["left", "right", "top", "bottom"]);
   /** @type {{ dx: number, dy: number, score: number, edge: string }[]} */
   const votes = [];
+  const fullBand = { x0: 0, y0: 0, x1: refScaled.w, y1: refScaled.h };
 
   for (const edge of edges) {
-    const origins = edgePatchOrigins(edge, movScaled.w, movScaled.h, tw, th);
-    const band = oppositeBand(edge, refScaled.w, refScaled.h, maxOverlapFrac);
-
-    for (const [px, py] of origins) {
+    for (const [px, py] of edgePatchOrigins(edge, movScaled.w, movScaled.h, tw, th)) {
       const patch = extractPatch(movScaled.gray, movScaled.w, movScaled.h, px, py, tw, th);
       if (patchVariance(patch) < 40) continue;
-      const hit = searchPatchInBand(refScaled, patch, tw, th, band, step);
+      const hit = searchPatchInBand(refScaled, patch, tw, th, fullBand, step);
       if (!hit) continue;
       votes.push({
         dx: hit.x - px,
@@ -413,12 +411,142 @@ function matchPair(refScaled, movScaled, refFull, movFull, coarseScale) {
   const inv = 1 / coarseScale;
   let dx = Math.round(consensus.dx * inv);
   let dy = Math.round(consensus.dy * inv);
-
   const refined = refinePairFull(refFull, movFull, dx, dy, 8);
   if (refined) {
     dx = refined.dx;
     dy = refined.dy;
   }
+
+  return scoreCandidate(refFull, movFull, dx, dy, consensus.patchScore, consensus.edge);
+}
+
+/**
+ * @typedef {{ canvas: HTMLCanvasElement, width: number, height: number, name: string, id: string }} Tile
+ */
+
+/**
+ * Full pair match: offset of B's origin in A's coordinate system.
+ * @param {Tile} tileA
+ * @param {Tile} tileB
+ * @param {{ threshold?: number, searchScale?: number }} [options]
+ */
+export function matchTwoTiles(tileA, tileB, options = {}) {
+  const threshold = options.threshold ?? 0.85;
+  const searchScale = options.searchScale ?? 0.2;
+  const gA = {
+    coarse: toGrayScaled(tileA.canvas, searchScale),
+    full: toGrayFull(tileA.canvas),
+  };
+  const gB = {
+    coarse: toGrayScaled(tileB.canvas, searchScale),
+    full: toGrayFull(tileB.canvas),
+  };
+
+  const ab = matchPair(gA.coarse, gB.coarse, gA.full, gB.full, searchScale);
+  const ba = matchPair(gB.coarse, gA.coarse, gB.full, gA.full, searchScale);
+
+  /** @type {ReturnType<typeof scoreCandidate> & { dx: number, dy: number } | null} */
+  let best = ab;
+
+  if (ba) {
+    const asAb = { ...ba, dx: -ba.dx, dy: -ba.dy };
+    if (!best || asAb.score > best.score) best = asAb;
+  }
+
+  if (ab && ba) {
+    const consX = Math.abs(ab.dx + ba.dx);
+    const consY = Math.abs(ab.dy + ba.dy);
+    if (consX <= 4 && consY <= 4) {
+      best = {
+        dx: Math.round((ab.dx - ba.dx) / 2),
+        dy: Math.round((ab.dy - ba.dy) / 2),
+        score: Math.min(1, Math.min(ab.score, ba.score) + 0.02),
+        patchScore: Math.min(ab.patchScore, ba.patchScore),
+        overlapScore: Math.min(ab.overlapScore, ba.overlapScore),
+        edge: `${ab.edge}/${ba.edge}`,
+      };
+    }
+  }
+
+  if (!best || best.score < threshold) return null;
+  return best;
+}
+
+/**
+ * Local snap around a user drop guess (moving origin in reference coords).
+ * @param {Tile|{ canvas: HTMLCanvasElement }} reference
+ * @param {Tile} moving
+ * @param {number} guessDx
+ * @param {number} guessDy
+ * @param {{ radius?: number, searchScale?: number, threshold?: number }} [options]
+ */
+export function snapNearOffset(reference, moving, guessDx, guessDy, options = {}) {
+  const radius = options.radius ?? 100;
+  const searchScale = options.searchScale ?? 0.25;
+  const threshold = options.threshold ?? 0.8;
+
+  const refCanvas = "canvas" in reference ? reference.canvas : reference;
+  const refFull = toGrayFull(refCanvas);
+  const movFull = toGrayFull(moving.canvas);
+  const refScaled = toGrayScaled(refCanvas, searchScale);
+  const movScaled = toGrayScaled(moving.canvas, searchScale);
+
+  const gx = Math.round(guessDx * searchScale);
+  const gy = Math.round(guessDy * searchScale);
+  const r = Math.max(8, Math.round(radius * searchScale));
+
+  const tw = Math.min(36, Math.floor(movScaled.w * 0.28), movScaled.w);
+  const th = Math.min(36, Math.floor(movScaled.h * 0.28), movScaled.h);
+  if (tw < 12 || th < 12) return null;
+
+  const step = Math.max(1, Math.floor(Math.min(tw, th) / 6));
+  /** @type {{ dx: number, dy: number, score: number, edge: string }[]} */
+  const votes = [];
+
+  for (const edge of /** @type {const} */ (["left", "right", "top", "bottom"])) {
+    for (const [px, py] of edgePatchOrigins(edge, movScaled.w, movScaled.h, tw, th)) {
+      const patch = extractPatch(movScaled.gray, movScaled.w, movScaled.h, px, py, tw, th);
+      if (patchVariance(patch) < 30) continue;
+      const localBand = {
+        x0: gx + px - r,
+        y0: gy + py - r,
+        x1: gx + px + r + tw,
+        y1: gy + py + r + th,
+      };
+      const hit = searchPatchInBand(refScaled, patch, tw, th, localBand, step);
+      if (!hit) continue;
+      votes.push({
+        dx: hit.x - px,
+        dy: hit.y - py,
+        score: hit.score,
+        edge,
+      });
+    }
+  }
+
+  let dx = Math.round(guessDx);
+  let dy = Math.round(guessDy);
+  let patchScore = 0.5;
+  let edge = "drop";
+
+  const consensus = bestConsensus(votes, Math.max(2, Math.ceil(r / 4)));
+  if (consensus) {
+    const inv = 1 / searchScale;
+    dx = Math.round(consensus.dx * inv);
+    dy = Math.round(consensus.dy * inv);
+    patchScore = consensus.patchScore;
+    edge = consensus.edge;
+  }
+
+  const refined = refinePairFull(refFull, movFull, dx, dy, Math.min(radius, 24));
+  if (refined) {
+    dx = refined.dx;
+    dy = refined.dy;
+    patchScore = Math.max(patchScore, refined.score);
+  }
+
+  const strict = scoreCandidate(refFull, movFull, dx, dy, patchScore, edge);
+  if (strict && strict.score >= threshold) return strict;
 
   const overlap = overlapSimilarity(
     refFull.gray,
@@ -430,33 +558,30 @@ function matchPair(refScaled, movScaled, refFull, movFull, coarseScale) {
     dx,
     dy
   );
-
-  if (overlap.area < 24 * 24) return null;
-  // Near-identical map pixels should be close after integer refine
-  if (overlap.mad > 22) return null;
-  if (overlap.ncc < 0.85) return null;
-  if (overlap.score < 0.78) return null;
-
-  const finalScore = consensus.patchScore * 0.3 + overlap.score * 0.7;
-  if (finalScore < 0.75) return null;
+  if (overlap.area >= 24 * 24 && overlap.ncc >= 0.7 && overlap.mad <= 35) {
+    return {
+      dx,
+      dy,
+      score: Math.max(threshold * 0.95, overlap.score * 0.9),
+      patchScore,
+      overlapScore: overlap.score,
+      edge: `${edge}+soft`,
+      weak: false,
+    };
+  }
 
   return {
-    dx,
-    dy,
-    score: finalScore,
-    patchScore: consensus.patchScore,
-    overlapScore: overlap.score,
-    votes: consensus.votes,
-    edge: consensus.edge,
+    dx: Math.round(guessDx),
+    dy: Math.round(guessDy),
+    score: overlap.score || 0.5,
+    patchScore: 0,
+    overlapScore: overlap.score || 0,
+    edge: "unsapped",
+    weak: true,
   };
 }
 
 /**
- * @typedef {{ canvas: HTMLCanvasElement, width: number, height: number, name: string, id: string }} Tile
- */
-
-/**
- * Composite placed tiles into a montage canvas.
  * @param {Tile[]} tiles
  * @param {Map<number, { dx: number, dy: number }>} abs
  * @param {{ index: number, dx: number, dy: number } | null} pending
@@ -469,6 +594,12 @@ export function compositeMontage(tiles, abs, pending = null) {
 
   const entries = [...abs.entries()];
   if (pending) entries.push([pending.index, { dx: pending.dx, dy: pending.dy }]);
+  if (!entries.length) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    return { canvas, placed: [], pendingRect: null, origin: { minX: 0, minY: 0 } };
+  }
 
   for (const [i, p] of entries) {
     const t = tiles[i];
@@ -515,260 +646,4 @@ export function compositeMontage(tiles, abs, pending = null) {
   }
 
   return { canvas, placed, pendingRect, origin: { minX, minY } };
-}
-
-/**
- * Progressive stitch: grow from a seed, optionally pause for Accept/Reject.
- *
- * @param {Tile[]} tiles
- * @param {{
- *   threshold?: number,
- *   searchScale?: number,
- *   previewIntervalMs?: number,
- *   onProgress?: (info: object) => void,
- *   onPreview?: (info: { canvas: HTMLCanvasElement, placedIds: string[], failedIds: string[], pendingId: string|null, msg: string }) => void,
- *   onPropose?: (info: {
- *     tile: Tile,
- *     anchor: Tile,
- *     score: number,
- *     edge: string,
- *     canvas: HTMLCanvasElement,
- *     placedIds: string[],
- *     remaining: number,
- *   }) => Promise<'accept'|'reject'|'accept-rest'|'stop'>,
- * }} options
- */
-export async function stitchTiles(tiles, options = {}) {
-  const threshold = options.threshold ?? 0.85;
-  const searchScale = options.searchScale ?? 0.2;
-  const previewIntervalMs = options.previewIntervalMs ?? 5000;
-  const onProgress = options.onProgress ?? (() => {});
-  const onPreview = options.onPreview ?? (() => {});
-  const onPropose = options.onPropose;
-
-  if (!tiles.length) throw new Error("No images to stitch");
-
-  /** @type {Map<string, { coarse: ReturnType<typeof toGrayScaled>, full: ReturnType<typeof toGrayFull> }>} */
-  const grayCache = new Map();
-  for (const t of tiles) {
-    grayCache.set(t.id, {
-      coarse: toGrayScaled(t.canvas, searchScale),
-      full: toGrayFull(t.canvas),
-    });
-  }
-
-  let seed = 0;
-  for (let i = 1; i < tiles.length; i++) {
-    if (tiles[i].width * tiles[i].height > tiles[seed].width * tiles[seed].height) {
-      seed = i;
-    }
-  }
-
-  /** @type {Map<number, { dx: number, dy: number }>} */
-  const abs = new Map();
-  abs.set(seed, { dx: 0, dy: 0 });
-
-  /** @type {Set<string>} */
-  const rejected = new Set();
-  /** @type {Record<string, string>} */
-  const matchHints = { [tiles[seed].id]: "seed" };
-  /** @type {{ a: string, b: string, score: number, edge: string, dx: number, dy: number }[]} */
-  const matches = [];
-
-  let autoAccept = !onPropose;
-  let stopped = false;
-  let lastPreviewAt = 0;
-
-  const placedIds = () => [...abs.keys()].map((i) => tiles[i].id);
-  const failedIds = () =>
-    tiles.filter((_, i) => !abs.has(i)).map((t) => t.id);
-
-  const emitPreview = async (msg, pending = null, force = false) => {
-    const now = Date.now();
-    if (!force && now - lastPreviewAt < previewIntervalMs && !pending) return;
-    lastPreviewAt = now;
-    const { canvas } = compositeMontage(tiles, abs, pending);
-    onPreview({
-      canvas,
-      placedIds: placedIds(),
-      failedIds: failedIds(),
-      pendingId: pending ? tiles[pending.index].id : null,
-      msg,
-    });
-    onProgress({
-      msg,
-      placedIds: placedIds(),
-      failedIds: failedIds(),
-      matchHints,
-      pendingId: pending ? tiles[pending.index].id : null,
-    });
-    await yieldToUi();
-  };
-
-  await emitPreview(`Seed: ${tiles[seed].name}`, null, true);
-
-  if (tiles.length === 1) {
-    const { canvas, placed } = compositeMontage(tiles, abs);
-    return {
-      canvas,
-      placed,
-      placedIds: placedIds(),
-      failedIds: [],
-      matches: [],
-    };
-  }
-
-  while (!stopped && abs.size < tiles.length) {
-    /** @type {null | {
-     *   cand: number,
-     *   anchor: number,
-     *   dx: number,
-     *   dy: number,
-     *   score: number,
-     *   edge: string,
-     * }} */
-    let best = null;
-    const unmatched = [];
-    for (let i = 0; i < tiles.length; i++) {
-      if (!abs.has(i)) unmatched.push(i);
-    }
-
-    let checks = 0;
-    const checkTotal = unmatched.length * abs.size;
-
-    for (const cand of unmatched) {
-      for (const anchor of abs.keys()) {
-        const key = `${cand}:${anchor}`;
-        if (rejected.has(key)) continue;
-        checks += 1;
-
-        if (checks % 3 === 0) {
-          onProgress({
-            msg: `Searching… ${abs.size} placed, ${unmatched.length} left (${checks}/${checkTotal})`,
-            placedIds: placedIds(),
-            failedIds: failedIds(),
-            matchHints,
-          });
-          await emitPreview(
-            `Searching… ${abs.size} placed · ${unmatched.length} remaining`,
-            null,
-            false
-          );
-          await yieldToUi();
-        }
-
-        const gA = grayCache.get(tiles[anchor].id);
-        const gB = grayCache.get(tiles[cand].id);
-        const hit = matchPair(gA.coarse, gB.coarse, gA.full, gB.full, searchScale);
-        if (!hit || hit.score < threshold) continue;
-
-        const ap = abs.get(anchor);
-        const absDx = ap.dx + hit.dx;
-        const absDy = ap.dy + hit.dy;
-
-        if (!best || hit.score > best.score) {
-          best = {
-            cand,
-            anchor,
-            dx: absDx,
-            dy: absDy,
-            score: hit.score,
-            edge: hit.edge,
-            relDx: hit.dx,
-            relDy: hit.dy,
-          };
-        }
-      }
-    }
-
-    if (!best) break;
-
-    const pending = { index: best.cand, dx: best.dx, dy: best.dy };
-    const { canvas: proposalCanvas } = compositeMontage(tiles, abs, pending);
-
-    onProgress({
-      msg: `Review: ${tiles[best.cand].name} → ${tiles[best.anchor].name} (${best.score.toFixed(3)}, ${best.edge})`,
-      placedIds: placedIds(),
-      failedIds: failedIds(),
-      matchHints,
-      pendingId: tiles[best.cand].id,
-    });
-    await emitPreview(
-      `Proposed ${tiles[best.cand].name} (score ${best.score.toFixed(3)})`,
-      pending,
-      true
-    );
-
-    /** @type {'accept'|'reject'|'accept-rest'|'stop'} */
-    let decision = "accept";
-    if (!autoAccept && onPropose) {
-      decision = await onPropose({
-        tile: tiles[best.cand],
-        anchor: tiles[best.anchor],
-        score: best.score,
-        edge: best.edge,
-        canvas: proposalCanvas,
-        placedIds: placedIds(),
-        remaining: unmatched.length,
-      });
-    }
-
-    if (decision === "stop") {
-      stopped = true;
-      break;
-    }
-
-    if (decision === "reject") {
-      rejected.add(`${best.cand}:${best.anchor}`);
-      matchHints[tiles[best.cand].id] = `rejected vs ${tiles[best.anchor].name}`;
-      await emitPreview(`Rejected ${tiles[best.cand].name}`, null, true);
-      continue;
-    }
-
-    if (decision === "accept-rest") {
-      autoAccept = true;
-    }
-
-    abs.set(best.cand, { dx: best.dx, dy: best.dy });
-    matchHints[tiles[best.cand].id] =
-      `${best.score.toFixed(3)} via ${tiles[best.anchor].name} [${best.edge}]`;
-    matches.push({
-      a: tiles[best.anchor].id,
-      b: tiles[best.cand].id,
-      score: best.score,
-      edge: best.edge,
-      dx: best.relDx,
-      dy: best.relDy,
-    });
-
-    await emitPreview(
-      `Accepted ${tiles[best.cand].name} · ${abs.size}/${tiles.length}`,
-      null,
-      true
-    );
-  }
-
-  const { canvas, placed } = compositeMontage(tiles, abs);
-  const pIds = placedIds();
-  const fIds = failedIds();
-
-  onProgress({
-    msg: `Done — ${pIds.length}/${tiles.length} placed`,
-    placedIds: pIds,
-    failedIds: fIds,
-    matchHints,
-  });
-  await emitPreview(`Done — ${pIds.length}/${tiles.length} placed`, null, true);
-
-  return {
-    canvas,
-    placed,
-    placedIds: pIds,
-    failedIds: fIds,
-    matches,
-  };
-}
-
-function yieldToUi() {
-  return new Promise((r) => setTimeout(r, 0));
 }

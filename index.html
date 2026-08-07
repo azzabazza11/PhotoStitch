@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PhotoStitch — overlap montage</title>
+  <title>PhotoStitch — pair &amp; snap</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
@@ -14,7 +14,7 @@
 
   <header class="top">
     <p class="brand">PhotoStitch</p>
-    <p class="tag">Drop overlapping screenshots. Match by pixels. Review each join. Export one montage.</p>
+    <p class="tag">Click two overlapping shots to match, or drag a tile onto the montage to snap. You choose every join.</p>
   </header>
 
   <main>
@@ -37,12 +37,7 @@
           <option value="0.3">Accurate (0.3×)</option>
         </select>
       </label>
-      <label class="field check">
-        <span>Review each tile</span>
-        <input id="reviewMode" type="checkbox" checked />
-      </label>
       <div class="actions">
-        <button type="button" id="stitchBtn" class="primary" disabled>Stitch</button>
         <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
         <button type="button" id="downloadBtn" class="ghost" disabled>Download PNG</button>
       </div>
@@ -65,7 +60,7 @@
       <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple hidden />
       <div class="drop-inner">
         <p class="drop-title">Drop screenshots here</p>
-        <p class="drop-hint">PNG preferred · any order · same zoom · heavy overlap</p>
+        <p class="drop-hint">Then click two to match · or drag one onto the montage to snap</p>
       </div>
     </section>
 
@@ -73,30 +68,26 @@
       <p id="status">Waiting for images.</p>
       <p id="counts"></p>
     </section>
-    <div class="progress" id="progress" hidden>
-      <div class="progress-bar" id="progressBar"></div>
-    </div>
 
     <section class="thumbs" id="thumbs" aria-label="Loaded images"></section>
 
-    <section id="reviewBar" class="review-bar" hidden aria-label="Tile review">
-      <p id="reviewMsg" class="review-msg">Proposed tile highlighted with a dashed outline.</p>
+    <section id="reviewBar" class="review-bar" hidden aria-label="Join review">
+      <p id="reviewMsg" class="review-msg">Proposed join — Accept to lock, Reject to try again.</p>
       <div class="review-actions">
         <button type="button" id="acceptBtn" class="primary">Accept (A)</button>
         <button type="button" id="rejectBtn" class="danger">Reject (R)</button>
-        <button type="button" id="acceptRestBtn" class="ghost">Accept rest</button>
-        <button type="button" id="stopBtn" class="ghost">Stop</button>
       </div>
     </section>
 
-    <section class="preview-wrap" aria-label="Montage preview">
+    <section class="preview-wrap" id="previewWrap" aria-label="Montage preview">
       <canvas id="preview"></canvas>
-      <p id="previewEmpty" class="preview-empty">Montage builds here live as tiles are matched.</p>
+      <p id="previewEmpty" class="preview-empty">Montage appears here. Drag a free tile onto this area to snap.</p>
+      <div id="dragGhost" class="drag-ghost" hidden></div>
     </section>
   </main>
 
   <footer>
-    <p>Runs entirely in your browser. Nothing is uploaded. Preview refreshes about every 5s while searching.</p>
+    <p>Runs in your browser. Click pair for a full match · drag-snap for “put it roughly here.”</p>
   </footer>
 
   <script type="module" src="app.js"></script>

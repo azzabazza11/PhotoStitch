@@ -6,3 +6,7 @@ node_modules/
 dist/
 .cache/
 montages/
+
+wellsford/
+*.png
+!**/favicon.png
