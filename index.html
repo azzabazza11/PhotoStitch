@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PhotoStitch — overlap montage</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="atmosphere" aria-hidden="true"></div>
+
+  <header class="top">
+    <p class="brand">PhotoStitch</p>
+    <p class="tag">Drop overlapping screenshots. Match by pixels. Export one montage.</p>
+  </header>
+
+  <main>
+    <section class="controls" aria-label="Stitch settings">
+      <label class="field">
+        <span>Crop edges (px)</span>
+        <input id="crop" type="number" min="0" max="400" step="1" value="80" />
+      </label>
+      <label class="field">
+        <span>Match confidence</span>
+        <input id="threshold" type="range" min="0.75" max="0.98" step="0.01" value="0.88" />
+        <output id="thresholdOut">0.88</output>
+      </label>
+      <label class="field">
+        <span>Search scale</span>
+        <select id="scale">
+          <option value="0.15">Fast (0.15×)</option>
+          <option value="0.25" selected>Balanced (0.25×)</option>
+          <option value="0.4">Accurate (0.4×)</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button type="button" id="stitchBtn" class="primary" disabled>Stitch</button>
+        <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
+        <button type="button" id="downloadBtn" class="ghost" disabled>Download PNG</button>
+      </div>
+    </section>
+
+    <section
+      id="drop"
+      class="drop"
+      tabindex="0"
+      role="button"
+      aria-label="Drop images or click to choose files"
+    >
+      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/*" multiple hidden />
+      <div class="drop-inner">
+        <p class="drop-title">Drop screenshots here</p>
+        <p class="drop-hint">PNG preferred · any order · same zoom · heavy overlap</p>
+      </div>
+    </section>
+
+    <section class="status-row" aria-live="polite">
+      <p id="status">Waiting for images.</p>
+      <p id="counts"></p>
+    </section>
+
+    <section class="thumbs" id="thumbs" aria-label="Loaded images"></section>
+
+    <section class="preview-wrap" aria-label="Montage preview">
+      <canvas id="preview"></canvas>
+      <p id="previewEmpty" class="preview-empty">Montage preview appears here after stitching.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Runs entirely in your browser. Nothing is uploaded.</p>
+  </footer>
+
+  <script type="module" src="stitcher.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
