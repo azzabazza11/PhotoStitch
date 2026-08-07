@@ -190,18 +190,20 @@ button:not(:disabled):hover {
   background: rgba(15, 26, 20, 0.92);
   overflow: hidden;
   z-index: 20;
-  transition: width 0.28s ease, box-shadow 0.28s ease;
+  transition: width 0.65s ease, box-shadow 0.65s ease;
 }
 
-body:not(.dragging-work) .photo-rail:hover,
-body.rail-pinned .photo-rail {
+body:not(.dragging-over-work) .photo-rail:hover,
+body.rail-pinned .photo-rail,
+body.dragging-tile:not(.dragging-over-work) .photo-rail {
   width: var(--rail-expanded);
   box-shadow: 12px 0 28px rgba(0, 0, 0, 0.4);
 }
 
-body.dragging-work .photo-rail {
+body.dragging-over-work .photo-rail {
   width: var(--rail-collapsed);
   box-shadow: none;
+  pointer-events: none;
 }
 
 .rail-inner {
@@ -358,16 +360,16 @@ body.dragging-work .photo-rail {
   color: var(--accent-ink);
 }
 
-/* collapsed rail: peek thumbs, hide meta */
-body:not(.dragging-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb-meta,
-body.dragging-work .thumb-meta,
-body:not(.dragging-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .group-badge,
-body.dragging-work .group-badge {
+/* collapsed rail: peek thumbs, hide meta — stay expanded while dragging until over montage */
+body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb-meta,
+body.dragging-over-work .thumb-meta,
+body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .group-badge,
+body.dragging-over-work .group-badge {
   display: none;
 }
 
-body:not(.dragging-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb,
-body.dragging-work .thumb {
+body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb,
+body.dragging-over-work .thumb {
   height: 58px;
 }
 
@@ -618,9 +620,10 @@ footer p {
   }
 
   .photo-rail,
-  body:not(.dragging-work) .photo-rail:hover,
+  body:not(.dragging-over-work) .photo-rail:hover,
   body.rail-pinned .photo-rail,
-  body.dragging-work .photo-rail {
+  body.dragging-tile:not(.dragging-over-work) .photo-rail,
+  body.dragging-over-work .photo-rail {
     width: 100%;
     min-width: 0;
     max-height: 32vh;

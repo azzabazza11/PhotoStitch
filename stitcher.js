@@ -783,9 +783,9 @@ export function workspacePadFor(tiles, movingIndex = -1) {
     maxW = Math.max(maxW, tiles[movingIndex].width);
     maxH = Math.max(maxH, tiles[movingIndex].height);
   }
-  // Full tile + slack so neighbors can be dragged around each other without clipping
+  // Enough room to drag around edges without drowning the photo in empty pad
   return {
-    x: Math.ceil(maxW * 1.15),
-    y: Math.ceil(maxH * 1.15),
+    x: Math.ceil(maxW * 0.45),
+    y: Math.ceil(maxH * 0.45),
   };
 }

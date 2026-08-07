@@ -7,7 +7,7 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=16";
+} from "./stitcher.js?v=18";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -209,27 +209,33 @@ function zoomAtClient(paneId, clientX, clientY, factor) {
 }
 
 /** Fit once for empty→first content only; never overrides user scroll-zoom. */
+/** Fit so the photo content fills the workspace (pad stays around it for dragging). */
 function fitPaneZoom(id) {
   const p = panes[id];
   if (p.userZoomed) {
     applyPaneZoom(id);
     return;
   }
-  if (!p.canvas.width) {
+  if (!p.canvas.width || !p.result?.width) {
     p.zoom = 1;
     p.panX = 0;
     p.panY = 0;
     applyPaneZoom(id);
     return;
   }
-  const availW = Math.max(40, p.wrap.clientWidth - 16);
-  const availH = Math.max(40, p.wrap.clientHeight - 16);
-  const sx = availW / p.canvas.width;
-  const sy = availH / p.canvas.height;
-  // Fill the right pane — no low zoom cap that leaves a tiny montage window
-  p.zoom = Math.min(4, Math.max(0.08, Math.min(sx, sy) * 0.98));
-  p.panX = (p.wrap.clientWidth - p.canvas.width * p.zoom) / 2;
-  p.panY = (p.wrap.clientHeight - p.canvas.height * p.zoom) / 2;
+  const availW = Math.max(80, p.wrap.clientWidth - 20);
+  const availH = Math.max(80, p.wrap.clientHeight - 20);
+  // Fit the tight montage, not the huge padded canvas — keeps the photo large
+  const contentW = p.result.width;
+  const contentH = p.result.height;
+  const sx = availW / contentW;
+  const sy = availH / contentH;
+  p.zoom = Math.min(3, Math.max(0.12, Math.min(sx, sy) * 0.92));
+  // Center the content rect within the wrap (pad extends beyond)
+  const padX = p.padX || 0;
+  const padY = p.padY || 0;
+  p.panX = (p.wrap.clientWidth - contentW * p.zoom) / 2 - padX * p.zoom;
+  p.panY = (p.wrap.clientHeight - contentH * p.zoom) / 2 - padY * p.zoom;
   applyPaneZoom(id);
 }
 
@@ -315,9 +321,11 @@ function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
   ctx.drawImage(padded, 0, 0);
   p.wrap.classList.add("has-result");
-  // Keep current zoom; only auto-fit the first time content appears (after layout)
+  // Fit after layout so the photo fills Workspace A (not a tiny padded window)
   if (!hadContent && !p.userZoomed) {
-    requestAnimationFrame(() => fitPaneZoom(id));
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => fitPaneZoom(id));
+    });
   } else {
     applyPaneZoom(id);
   }
@@ -1153,7 +1161,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
   let lastHover = null;
   const canLiveSnap = !lockedIds.has(fromId);
 
-  document.body.classList.add("dragging-work");
+  document.body.classList.add("dragging-tile");
 
   const onMove = (ev) => {
     if (ev.pointerId !== pointerId) return;
@@ -1166,6 +1174,10 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
     autoScrollRail(ev.clientY);
 
     const overPane = paneAtPoint(ev.clientX, ev.clientY);
+    // Collapse left rail only once the drag has crossed into a montage pane
+    document.body.classList.toggle("dragging-over-work", Boolean(overPane));
+    // Let drops hit the montage under the expanded rail overlay
+    photoRail.style.pointerEvents = overPane ? "none" : "";
     for (const p of Object.values(panes)) {
       p.el.classList.toggle("drop-hot", p.id === overPane);
     }
@@ -1243,7 +1255,8 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
     dragGhost.hidden = true;
     clearDropHighlights();
     hideLiveConf();
-    document.body.classList.remove("dragging-work");
+    document.body.classList.remove("dragging-tile", "dragging-over-work");
+    photoRail.style.pointerEvents = "";
 
     const i = dragIndex;
     dragIndex = null;
@@ -1251,6 +1264,18 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
 
     if (!dragMoved) {
       clearMontageDragPreview();
+      return;
+    }
+
+    // Prefer montage placement whenever the pointer is over a workspace
+    // (expanded rail can overlap the left edge of the wrap)
+    const overPane = paneAtPoint(ev.clientX, ev.clientY);
+    if (overPane) {
+      setFocusedPane(overPane);
+      const rect = panes[overPane].canvas.getBoundingClientRect();
+      finishDragPlace(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
+        clearMontageDragPreview();
+      });
       return;
     }
 
@@ -1269,7 +1294,7 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
 
     const hover = thumbAtPoint(ev.clientX, ev.clientY);
 
-    // Return placed tile to rail when dropped on drop-zone or empty rail (not on another thumb)
+    // Return placed tile to rail when dropped on drop-zone or empty rail
     if (tileGroup.has(i) && (overDropZone || (overThumbs && !hover))) {
       clearMontageDragPreview();
       unplaceByIds([fromId]);
@@ -1293,16 +1318,6 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
       setTimeout(() => {
         dragMoved = false;
       }, 0);
-      return;
-    }
-
-    const overPane = paneAtPoint(ev.clientX, ev.clientY);
-    if (overPane) {
-      setFocusedPane(overPane);
-      const rect = panes[overPane].canvas.getBoundingClientRect();
-      finishDragPlace(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
-        clearMontageDragPreview();
-      });
       return;
     }
 
