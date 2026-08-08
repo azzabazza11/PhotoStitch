@@ -205,14 +205,13 @@ button:not(:disabled):hover {
   grid-template-rows: auto 1fr;
 }
 
-body:not(.dragging-over-work) .photo-rail:hover,
-body.rail-pinned .photo-rail,
-body.dragging-tile:not(.dragging-over-work) .photo-rail {
+/* Width only changes via explicit pin/open — never hover or drag */
+body.rail-pinned .photo-rail {
   width: var(--rail-expanded);
 }
 
 body.dragging-over-work .photo-rail {
-  width: var(--rail-collapsed);
+  /* Stay at current width; only ignore hits so drops reach the montage */
   pointer-events: none;
 }
 
@@ -235,7 +234,7 @@ body.dragging-over-work .photo-rail {
   overflow: hidden;
 }
 
-body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .rail-toolbar-label {
+body:not(.rail-pinned) .rail-toolbar-label {
   display: none;
 }
 
@@ -415,16 +414,13 @@ body.rail-pinned .rail-edge {
   color: var(--accent-ink);
 }
 
-/* collapsed rail: peek thumbs, hide meta — stay expanded while dragging until over montage */
-body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb-meta,
-body.dragging-over-work .thumb-meta,
-body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .group-badge,
-body.dragging-over-work .group-badge {
+/* collapsed rail: peek thumbs, hide meta */
+body:not(.rail-pinned) .thumb-meta,
+body:not(.rail-pinned) .group-badge {
   display: none;
 }
 
-body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb,
-body.dragging-over-work .thumb {
+body:not(.rail-pinned) .thumb {
   height: 58px;
   max-height: 58px;
   object-fit: contain;
@@ -724,10 +720,7 @@ footer p {
   }
 
   .photo-rail,
-  body:not(.dragging-over-work) .photo-rail:hover,
-  body.rail-pinned .photo-rail,
-  body.dragging-tile:not(.dragging-over-work) .photo-rail,
-  body.dragging-over-work .photo-rail {
+  body.rail-pinned .photo-rail {
     width: 100%;
     min-width: 0;
     max-height: 32vh;

@@ -7,10 +7,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=24";
+} from "./stitcher.js?v=25";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "24";
+const APP_VERSION = "25";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -117,8 +117,10 @@ function setRailPinned(on) {
   document.body.classList.toggle("rail-pinned", pinned);
   if (railPinBtn) {
     railPinBtn.setAttribute("aria-pressed", pinned ? "true" : "false");
-    railPinBtn.textContent = pinned ? "Unpin" : "Pin";
-    railPinBtn.title = pinned ? "Collapse photo pane when not hovered" : "Keep photo pane open";
+    railPinBtn.textContent = pinned ? "Close" : "Open";
+    railPinBtn.title = pinned
+      ? "Collapse the photo pane (stays until you open it again)"
+      : "Open the photo pane (stays open until you close it)";
   }
   try {
     localStorage.setItem("photostitch-rail-pinned", pinned ? "1" : "0");
@@ -132,7 +134,7 @@ function setRailPinned(on) {
 function toggleRailPinned() {
   const next = !document.body.classList.contains("rail-pinned");
   setRailPinned(next);
-  setStatus(next ? "Photo pane pinned open." : "Photo pane unpinned — hover to open.");
+  setStatus(next ? "Photo pane open — stays until you Close." : "Photo pane closed — stays until you Open.");
 }
 
 /** @type {{ id: string, file: File, url: string, img: HTMLImageElement }[]} */
