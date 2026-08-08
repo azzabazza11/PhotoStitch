@@ -7,10 +7,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=23";
+} from "./stitcher.js?v=24";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "23";
+const APP_VERSION = "24";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -37,11 +37,11 @@ const unlockBtn = document.getElementById("unlockBtn");
 const returnBtn = document.getElementById("returnBtn");
 const panesEl = document.getElementById("panes");
 const cropInput = document.getElementById("crop");
+const cropApplyBtn = document.getElementById("cropApplyBtn");
+const restoreBtn = document.getElementById("restoreBtn");
 const thresholdInput = document.getElementById("threshold");
 const thresholdOut = document.getElementById("thresholdOut");
 const scaleSelect = document.getElementById("scale");
-const cropPreview = document.getElementById("cropPreview");
-const cropCanvas = document.getElementById("cropCanvas");
 const dragGhost = document.getElementById("dragGhost");
 const liveConf = document.getElementById("liveConf");
 const liveConfFill = document.getElementById("liveConfFill");
@@ -195,10 +195,72 @@ let railScrollRaf = 0;
 thresholdInput.addEventListener("input", () => {
   thresholdOut.textContent = Number(thresholdInput.value).toFixed(2);
 });
-cropInput.addEventListener("input", () => {
-  rebuildTiles();
-  updateCropPreview();
-});
+// Crop value is a default / pending amount — only applied via "Crop sel"
+cropInput.addEventListener("change", () => scheduleAutosave());
+
+function defaultCropPx() {
+  return Math.max(0, Number(cropInput.value) || 0);
+}
+
+function makeTileFromLoaded(item) {
+  const cropPx = item.cropPx ?? 0;
+  const cropped = cropImage(item.img, cropPx, item.file.name);
+  return { ...cropped, id: item.id, cropPx };
+}
+
+/** Rebuild tile bitmaps from loaded[] without wiping placements. */
+function rebuildTilesKeepPlacements() {
+  const placements = snapshotPlacementsById();
+  tiles = loaded.map(makeTileFromLoaded);
+  restorePlacementsById(placements);
+  refreshAllPreviews();
+  renderThumbs();
+  updateThumbSize();
+  updateButtons();
+  updateCounts();
+}
+
+/**
+ * Apply the Crop field to selected photos only (undoable). Keeps montage.
+ */
+function applyCropToSelected() {
+  if (busy) return;
+  if (!selection.length) {
+    setStatus("Select one or more photos, then Crop sel.", "error");
+    return;
+  }
+  const newCrop = defaultCropPx();
+  pushHistory();
+  let changed = 0;
+  for (const id of selection) {
+    const item = loaded.find((l) => l.id === id);
+    if (!item) continue;
+    const oldCrop = item.cropPx ?? 0;
+    const appliedOld = effectiveCrop(item.img.width, item.img.height, oldCrop);
+    const appliedNew = effectiveCrop(item.img.width, item.img.height, newCrop);
+    if (appliedOld === appliedNew && oldCrop === newCrop) continue;
+    const delta = appliedOld - appliedNew;
+    item.cropPx = newCrop;
+    const idx = indexById(id);
+    if (idx >= 0 && tileGroup.has(idx) && delta !== 0) {
+      const pos = groups.get(tileGroup.get(idx)).get(idx);
+      pos.dx -= delta;
+      pos.dy -= delta;
+    }
+    changed += 1;
+  }
+  tiles = loaded.map(makeTileFromLoaded);
+  refreshAllPreviews();
+  renderThumbs();
+  updateButtons();
+  updateCounts();
+  scheduleAutosave();
+  setStatus(
+    changed
+      ? `Crop ${newCrop}px on ${changed} selected — Undo to revert.`
+      : `Selected photos already at crop ${newCrop}px.`
+  );
+}
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
@@ -287,6 +349,7 @@ function updateButtons() {
   clearBtn.disabled = busy || (loaded.length === 0 && !hasResult && history.length === 0);
   undoBtn.disabled = busy || history.length === 0;
   downloadBtn.disabled = busy || !hasResult;
+  if (cropApplyBtn) cropApplyBtn.disabled = busy || selection.length === 0;
 
   const selectedIdx = selection.map((id) => indexById(id)).filter((i) => i >= 0);
   const placedSel = selectedIdx.filter((i) => tileGroup.has(i));
@@ -329,25 +392,9 @@ function indexById(id) {
   return tiles.findIndex((t) => t.id === id);
 }
 
+/** @deprecated use rebuildTilesKeepPlacements — kept name for call sites that mean "sync tiles" */
 function rebuildTiles() {
-  const cropPx = Number(cropInput.value) || 0;
-  tiles = loaded.map((item) => {
-    const cropped = cropImage(item.img, cropPx, item.file.name);
-    return { ...cropped, id: item.id };
-  });
-  groups = new Map();
-  tileGroup = new Map();
-  nextGroup = 1;
-  panes.a.groupId = null;
-  panes.b.groupId = null;
-  history = [];
-  selection = [];
-  lockedIds = new Set();
-  panes.a.userZoomed = false;
-  panes.b.userZoomed = false;
-  refreshAllPreviews();
-  renderThumbs();
-  updateThumbSize();
+  rebuildTilesKeepPlacements();
 }
 
 function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
@@ -456,11 +503,16 @@ function renderThumbs() {
     const meta = document.createElement("span");
     meta.className = "thumb-meta";
     if (lockedIds.has(item.id)) meta.textContent = gid ? `${gid} · locked` : "locked";
-    else if (gid) meta.textContent = gid;
-    else if (selection.includes(item.id)) {
+    else if (gid) {
+      const crop = item.cropPx ?? 0;
+      meta.textContent = crop ? `${gid} · crop ${crop}` : gid;
+    } else if (selection.includes(item.id)) {
       const n = selection.indexOf(item.id) + 1;
       meta.textContent = selection.length <= 2 ? (n === 1 ? "1st" : "2nd") : `#${n}`;
-    } else meta.textContent = item.file.name;
+    } else {
+      const crop = item.cropPx ?? 0;
+      meta.textContent = crop ? `crop ${crop} · ${item.file.name}` : item.file.name;
+    }
 
     if (gid) {
       const badge = document.createElement("span");
@@ -822,20 +874,16 @@ function removeSelectedPhotos() {
   const placements = snapshotPlacementsById();
   const lockedSnap = [...lockedIds].filter((id) => !idSet.has(id));
   loaded = loaded.filter((l) => !idSet.has(l.id));
-  const cropPx = Number(cropInput.value) || 0;
-  tiles = loaded.map((item) => {
-    const cropped = cropImage(item.img, cropPx, item.file.name);
-    return { ...cropped, id: item.id };
-  });
+  tiles = loaded.map(makeTileFromLoaded);
   restorePlacementsById(placements);
   lockedIds = new Set(lockedSnap.filter((id) => indexById(id) >= 0));
   selection = [];
-  updateCropPreview();
   updateThumbSize();
   refreshAllPreviews();
   renderThumbs();
   updateCounts();
   updateButtons();
+  scheduleAutosave();
   setStatus(`Removed ${ids.length} photo${ids.length === 1 ? "" : "s"}.`);
 }
 
@@ -966,6 +1014,23 @@ function snapshotPlacementsById() {
   return placements;
 }
 
+function snapshotCrops() {
+  /** @type {Record<string, number>} */
+  const crops = {};
+  for (const item of loaded) crops[item.id] = item.cropPx ?? 0;
+  return crops;
+}
+
+function applyCropsRecord(crops) {
+  if (!crops) return;
+  for (const item of loaded) {
+    if (Object.prototype.hasOwnProperty.call(crops, item.id)) {
+      item.cropPx = crops[item.id];
+    }
+  }
+  tiles = loaded.map(makeTileFromLoaded);
+}
+
 function restorePlacementsById(placements) {
   groups = new Map();
   tileGroup = new Map();
@@ -987,12 +1052,14 @@ function pushHistory() {
   }
   history.push({
     placements: clone,
+    crops: snapshotCrops(),
     nextGroup,
     paneGroups: { a: panes.a.groupId, b: panes.b.groupId },
     lockedIds: [...lockedIds],
   });
   if (history.length > 80) history.shift();
   updateButtons();
+  scheduleAutosave();
 }
 
 function undoLast() {
@@ -1001,6 +1068,8 @@ function undoLast() {
   nextGroup = snap.nextGroup;
   panes.a.groupId = snap.paneGroups.a;
   panes.b.groupId = snap.paneGroups.b;
+  if (snap.crops) applyCropsRecord(snap.crops);
+  else tiles = loaded.map(makeTileFromLoaded);
   restorePlacementsById(snap.placements);
   lockedIds = new Set(snap.lockedIds || []);
   for (const pan of Object.values(panes)) {
@@ -1011,6 +1080,7 @@ function undoLast() {
   renderThumbs();
   updateCounts();
   updateButtons();
+  scheduleAutosave();
   setStatus(
     history.length
       ? `Undid last change. ${tileGroup.size} tiles placed.`
@@ -1715,51 +1785,7 @@ async function finishDragPlace(movingIndex, paneId, frozenPose) {
 }
 
 function updateCropPreview() {
-  if (!loaded.length) {
-    cropPreview.hidden = true;
-    return;
-  }
-  const item = loaded[0];
-  const cropPx = Number(cropInput.value) || 0;
-  const c = effectiveCrop(item.img.width, item.img.height, cropPx);
-  const srcW = item.img.width;
-  const srcH = item.img.height;
-  const maxW = 320;
-  const maxH = 180;
-  const scale = Math.min(maxW / srcW, maxH / srcH, 1);
-  const dw = Math.round(srcW * scale);
-  const dh = Math.round(srcH * scale);
-  cropCanvas.width = dw;
-  cropCanvas.height = dh;
-  const ctx = cropCanvas.getContext("2d");
-  ctx.clearRect(0, 0, dw, dh);
-  ctx.drawImage(item.img, 0, 0, dw, dh);
-  const cx = c * scale;
-  const cy = c * scale;
-  ctx.fillStyle = "rgba(10, 18, 14, 0.55)";
-  ctx.fillRect(0, 0, dw, cy);
-  ctx.fillRect(0, dh - cy, dw, cy);
-  ctx.fillRect(0, cy, cx, dh - cy * 2);
-  ctx.fillRect(dw - cx, cy, cx, dh - cy * 2);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, dw, cy);
-  ctx.rect(0, dh - cy, dw, cy);
-  ctx.rect(0, cy, cx, dh - cy * 2);
-  ctx.rect(dw - cx, cy, cx, dh - cy * 2);
-  ctx.clip();
-  ctx.strokeStyle = "rgba(240, 160, 144, 0.35)";
-  for (let i = -dh; i < dw + dh; i += 8) {
-    ctx.beginPath();
-    ctx.moveTo(i, 0);
-    ctx.lineTo(i + dh, dh);
-    ctx.stroke();
-  }
-  ctx.restore();
-  ctx.strokeStyle = "rgba(196, 232, 106, 0.9)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(cx + 1, cy + 1, dw - cx * 2 - 2, dh - cy * 2 - 2);
-  cropPreview.hidden = false;
+  // no-op: crop marker overlay removed
 }
 
 function bytesToHex(buf) {
@@ -1842,6 +1868,7 @@ async function addFiles(files) {
       url,
       img,
       fingerprint,
+      cropPx: defaultCropPx(),
     });
     added += 1;
   }
@@ -1857,10 +1884,9 @@ async function addFiles(files) {
     return;
   }
 
-  rebuildTiles();
-  updateCropPreview();
-  updateCounts();
-  updateButtons();
+  // Append tiles — do not wipe existing montage
+  rebuildTilesKeepPlacements();
+  scheduleAutosave();
   const skipBits = [];
   if (skippedNameSize) skipBits.push(`${skippedNameSize} name+size`);
   if (skippedPixels) skipBits.push(`${skippedPixels} pixel-identical`);
@@ -1887,13 +1913,236 @@ function clearAll() {
   panes.b.userZoomed = false;
   clearPanePreview("a");
   clearPanePreview("b");
-  cropPreview.hidden = true;
   renderThumbs();
   updateThumbSize();
   updateCounts();
   updateButtons();
   setStatus("Waiting for images.");
   fileInput.value = "";
+  clearAutosave();
+}
+
+/* —— Local autosave (IndexedDB) —— */
+const IDB_NAME = "photostitch-db";
+const IDB_STORE = "workspace";
+const IDB_KEY = "autosave";
+let autosaveTimer = 0;
+let autosaveBusy = false;
+/** @type {object | null} */
+let pendingAutosave = null;
+
+function openIdb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbPut(value) {
+  const db = await openIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, IDB_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbGet() {
+  const db = await openIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbDelete() {
+  const db = await openIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(IDB_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function scheduleAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = 0;
+    void writeAutosave();
+  }, 900);
+}
+
+async function writeAutosave() {
+  if (autosaveBusy) {
+    pendingAutosave = true;
+    return;
+  }
+  if (!loaded.length && !tileGroup.size) {
+    await clearAutosave();
+    return;
+  }
+  autosaveBusy = true;
+  try {
+    const placements = [];
+    for (const [id, p] of snapshotPlacementsById()) {
+      placements.push([id, { gid: p.gid, dx: p.dx, dy: p.dy, z: p.z ?? 0 }]);
+    }
+    const items = [];
+    for (const item of loaded) {
+      items.push({
+        id: item.id,
+        name: item.file.name,
+        type: item.file.type || "image/png",
+        lastModified: item.file.lastModified || Date.now(),
+        size: item.file.size,
+        cropPx: item.cropPx ?? 0,
+        blob: item.file,
+      });
+    }
+    await idbPut({
+      v: 1,
+      savedAt: Date.now(),
+      cropDefault: defaultCropPx(),
+      threshold: Number(thresholdInput.value),
+      scale: scaleSelect.value,
+      workspaceBVisible,
+      nextGroup,
+      paneGroups: { a: panes.a.groupId, b: panes.b.groupId },
+      lockedIds: [...lockedIds],
+      placements,
+      items,
+    });
+    if (restoreBtn) {
+      restoreBtn.hidden = false;
+      restoreBtn.textContent = "Restore";
+      restoreBtn.title = `Reload autosave from ${new Date().toLocaleTimeString()}`;
+    }
+  } catch (err) {
+    console.warn("Autosave failed", err);
+  } finally {
+    autosaveBusy = false;
+    if (pendingAutosave) {
+      pendingAutosave = null;
+      scheduleAutosave();
+    }
+  }
+}
+
+async function clearAutosave() {
+  try {
+    await idbDelete();
+  } catch (_) {}
+  if (restoreBtn) restoreBtn.hidden = true;
+}
+
+async function checkAutosaveOnLoad() {
+  try {
+    const save = await idbGet();
+    if (!save?.items?.length) {
+      if (restoreBtn) restoreBtn.hidden = true;
+      return;
+    }
+    if (restoreBtn) {
+      restoreBtn.hidden = false;
+      const when = save.savedAt ? new Date(save.savedAt).toLocaleString() : "earlier";
+      restoreBtn.title = `Restore session saved ${when}`;
+      restoreBtn.textContent = "Restore";
+    }
+    if (!loaded.length) {
+      setStatus(`Autosave available (${save.items.length} photos) — click Restore to reload.`);
+    }
+  } catch (_) {}
+}
+
+async function restoreAutosave() {
+  if (busy) return;
+  busy = true;
+  updateButtons();
+  setStatus("Restoring autosave…", "busy");
+  try {
+    const save = await idbGet();
+    if (!save?.items?.length) {
+      setStatus("No autosave found.", "error");
+      return;
+    }
+    for (const item of loaded) URL.revokeObjectURL(item.url);
+    loaded = [];
+    tiles = [];
+    groups = new Map();
+    tileGroup = new Map();
+    history = [];
+    selection = [];
+    lockedIds = new Set(save.lockedIds || []);
+
+    if (typeof save.cropDefault === "number") cropInput.value = String(save.cropDefault);
+    if (save.threshold != null) {
+      thresholdInput.value = String(save.threshold);
+      thresholdOut.textContent = Number(save.threshold).toFixed(2);
+    }
+    if (save.scale) scaleSelect.value = String(save.scale);
+    setWorkspaceBVisible(Boolean(save.workspaceBVisible));
+    nextGroup = save.nextGroup || 1;
+    panes.a.groupId = save.paneGroups?.a || null;
+    panes.b.groupId = save.paneGroups?.b || null;
+
+    for (const entry of save.items) {
+      const blob = entry.blob;
+      const file =
+        blob instanceof File
+          ? blob
+          : new File([blob], entry.name || "photo.png", {
+              type: entry.type || "image/png",
+              lastModified: entry.lastModified || Date.now(),
+            });
+      const url = URL.createObjectURL(file);
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error(entry.name));
+        el.src = url;
+      });
+      loaded.push({
+        id: entry.id,
+        file,
+        url,
+        img,
+        cropPx: entry.cropPx ?? 0,
+        fingerprint: null,
+      });
+    }
+
+    tiles = loaded.map(makeTileFromLoaded);
+    const placeMap = new Map(save.placements || []);
+    restorePlacementsById(placeMap);
+    for (const pan of Object.values(panes)) {
+      if (pan.groupId && !groups.has(pan.groupId)) pan.groupId = null;
+    }
+    panes.a.userZoomed = false;
+    panes.b.userZoomed = false;
+    refreshAllPreviews();
+    renderThumbs();
+    updateThumbSize();
+    updateCounts();
+    updateButtons();
+    setStatus(
+      `Restored ${loaded.length} photos · ${tileGroup.size} placed (${new Date(save.savedAt).toLocaleString()}).`
+    );
+  } catch (err) {
+    console.error(err);
+    setStatus("Restore failed — autosave may be incomplete.", "error");
+  } finally {
+    busy = false;
+    updateButtons();
+  }
 }
 
 function downloadPng() {
@@ -2131,6 +2380,10 @@ lockBtn.addEventListener("click", lockSelected);
 unlockBtn.addEventListener("click", unlockSelected);
 returnBtn.addEventListener("click", returnSelectedToRail);
 workspace2Btn.addEventListener("click", toggleWorkspaceB);
+cropApplyBtn?.addEventListener("click", applyCropToSelected);
+restoreBtn?.addEventListener("click", () => {
+  void restoreAutosave();
+});
 railPinBtn?.addEventListener("click", (e) => {
   e.stopPropagation();
   toggleRailPinned();
@@ -2173,3 +2426,4 @@ updateThumbSize();
 updateButtons();
 applyPaneZoom("a");
 applyPaneZoom("b");
+void checkAutosaveOnLoad();

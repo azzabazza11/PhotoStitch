@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=23" />
+  <link rel="stylesheet" href="styles.css?v=24" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -23,8 +23,20 @@
       <section class="controls" aria-label="Stitch settings">
         <label class="field">
           <span>Crop</span>
-          <input id="crop" type="number" min="0" max="400" step="1" value="80" />
+          <input id="crop" type="number" min="0" max="400" step="1" value="0" title="Pixels trimmed from each edge — apply to selected photos" />
         </label>
+        <div class="actions">
+          <button type="button" id="cropApplyBtn" class="ghost" disabled title="Apply crop to selected photos (undoable)">Crop sel</button>
+          <button type="button" id="restoreBtn" class="ghost" hidden title="Reload last autosaved session">Restore</button>
+          <button type="button" id="workspace2Btn" class="ghost" aria-pressed="false" title="Show or hide Workspace B">+ Workspace</button>
+          <button type="button" id="matchBtn" class="ghost" disabled>Match</button>
+          <button type="button" id="lockBtn" class="ghost" disabled>Lock</button>
+          <button type="button" id="unlockBtn" class="ghost" disabled>Unlock</button>
+          <button type="button" id="returnBtn" class="ghost" disabled>Return</button>
+          <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
+          <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
+          <button type="button" id="downloadBtn" class="ghost" disabled>Download</button>
+        </div>
         <label class="field">
           <span>Confidence</span>
           <input id="threshold" type="range" min="0.72" max="0.96" step="0.01" value="0.85" />
@@ -38,16 +50,6 @@
             <option value="0.3">Accurate</option>
           </select>
         </label>
-        <div class="actions">
-          <button type="button" id="workspace2Btn" class="ghost" aria-pressed="false" title="Show or hide Workspace B">+ Workspace</button>
-          <button type="button" id="matchBtn" class="ghost" disabled>Match</button>
-          <button type="button" id="lockBtn" class="ghost" disabled>Lock</button>
-          <button type="button" id="unlockBtn" class="ghost" disabled>Unlock</button>
-          <button type="button" id="returnBtn" class="ghost" disabled>Return</button>
-          <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
-          <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
-          <button type="button" id="downloadBtn" class="ghost" disabled>Download</button>
-        </div>
       </section>
     </header>
 
@@ -70,10 +72,6 @@
               <p class="drop-title">Add photos</p>
               <p class="drop-hint">Drop or click</p>
             </div>
-          </section>
-
-          <section id="cropPreview" class="crop-preview" hidden aria-label="Crop preview">
-            <canvas id="cropCanvas" width="280" height="160"></canvas>
           </section>
 
           <section class="thumbs" id="thumbs" aria-label="Loaded images"></section>
@@ -126,7 +124,7 @@
     </div>
 
     <footer>
-      <p><span id="appVersionFooter">v?</span> · Click select (yellow outline) · arrows nudge · right-click layers · drop places exactly · Match · scroll zoom · Space pan · Undo Ctrl+Z</p>
+      <p><span id="appVersionFooter">v?</span> · Autosaves locally · Crop sel on selected · arrows nudge · right-click layers · Undo Ctrl+Z</p>
     </footer>
   </div>
 
@@ -139,6 +137,6 @@
     <hr />
     <button type="button" role="menuitem" data-action="nudge-hint" disabled>Arrows nudge · Shift=10px</button>
   </div>
-  <script type="module" src="app.js?v=23"></script>
+  <script type="module" src="app.js?v=24"></script>
 </body>
 </html>
