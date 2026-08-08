@@ -7,21 +7,23 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=21";
+} from "./stitcher.js?v=23";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "21";
+const APP_VERSION = "23";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
 const thumbs = document.getElementById("thumbs");
 const photoRail = document.getElementById("photoRail");
 const railInner = photoRail.querySelector(".rail-inner");
+const railPinBtn = document.getElementById("railPinBtn");
 const workColumn = document.querySelector(".work-column");
 const statusEl = document.getElementById("status");
 const countsEl = document.getElementById("counts");
 const appVersionEl = document.getElementById("appVersion");
 const appVersionFooter = document.getElementById("appVersionFooter");
+const tileMenu = document.getElementById("tileMenu");
 if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
 if (appVersionFooter) appVersionFooter.textContent = `v${APP_VERSION}`;
 document.title = `PhotoStitch v${APP_VERSION}`;
@@ -110,21 +112,44 @@ function toggleWorkspaceB() {
   );
 }
 
+function setRailPinned(on) {
+  const pinned = Boolean(on);
+  document.body.classList.toggle("rail-pinned", pinned);
+  if (railPinBtn) {
+    railPinBtn.setAttribute("aria-pressed", pinned ? "true" : "false");
+    railPinBtn.textContent = pinned ? "Unpin" : "Pin";
+    railPinBtn.title = pinned ? "Collapse photo pane when not hovered" : "Keep photo pane open";
+  }
+  try {
+    localStorage.setItem("photostitch-rail-pinned", pinned ? "1" : "0");
+  } catch (_) {}
+  // Layout width changed — keep current zoom framing
+  requestAnimationFrame(() => {
+    for (const id of /** @type {const} */ (["a", "b"])) applyPaneZoom(id);
+  });
+}
+
+function toggleRailPinned() {
+  const next = !document.body.classList.contains("rail-pinned");
+  setRailPinned(next);
+  setStatus(next ? "Photo pane pinned open." : "Photo pane unpinned — hover to open.");
+}
+
 /** @type {{ id: string, file: File, url: string, img: HTMLImageElement }[]} */
 let loaded = [];
 /** @type {import('./stitcher.js').Tile[] | { canvas: HTMLCanvasElement, width: number, height: number, name: string, id: string }[]} */
 let tiles = [];
 
 /**
- * groups: groupId -> Map(tileIndex -> {dx,dy})
- * @type {Map<string, Map<number, { dx: number, dy: number }>>}
+ * groups: groupId -> Map(tileIndex -> {dx,dy,z})
+ * @type {Map<string, Map<number, { dx: number, dy: number, z?: number }>>}
  */
 let groups = new Map();
 /** @type {Map<number, string>} tileIndex -> groupId */
 let tileGroup = new Map();
 let nextGroup = 1;
 
-/** @type {{ placements: Map<string, { gid: string, dx: number, dy: number }>, nextGroup: number, paneGroups: { a: string | null, b: string | null } }[]} */
+/** @type {{ placements: Map<string, { gid: string, dx: number, dy: number, z?: number }>, nextGroup: number, paneGroups: { a: string | null, b: string | null }, lockedIds?: string[] }[]} */
 let history = [];
 
 /** @type {string[]} selected loaded ids */
@@ -135,6 +160,9 @@ let selection = [];
 let lockedIds = new Set();
 
 let busy = false;
+/** Collapse consecutive arrow nudges into one undo step */
+let nudgeHistoryArmed = true;
+let spaceHeld = false;
 
 /** Drag state */
 let dragIndex = null;
@@ -390,7 +418,8 @@ function refreshPane(id) {
   }
 
   const abs = new Map(groups.get(gid));
-  const { canvas } = compositeMontage(tiles, abs, null);
+  const selectedIds = new Set(selection);
+  const { canvas } = compositeMontage(tiles, abs, null, { selectedIds });
   showPreviewOnPane(id, canvas);
 }
 
@@ -452,6 +481,19 @@ function renderThumbs() {
       onThumbClick(item.id, e);
     });
 
+    wrap.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const i = indexById(item.id);
+      if (!tileGroup.has(i)) {
+        selection = [item.id];
+        renderThumbs();
+        refreshAllPreviews();
+        setStatus("Place the tile on a workspace before changing layers.");
+        return;
+      }
+      showTileMenu(e.clientX, e.clientY, item.id);
+    });
+
     wrap.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       const i = indexById(item.id);
@@ -470,6 +512,7 @@ function renderThumbs() {
 
 function onThumbClick(id, e = null) {
   if (busy) return;
+  hideTileMenu();
 
   const multi = e && (e.ctrlKey || e.metaKey);
 
@@ -477,9 +520,10 @@ function onThumbClick(id, e = null) {
     if (selection.includes(id)) selection = selection.filter((x) => x !== id);
     else selection.push(id);
     renderThumbs();
+    refreshAllPreviews();
     setStatus(
       selection.length
-        ? `${selection.length} selected — Lock / Unlock / Return / Del, or Match when exactly 2.`
+        ? `${selection.length} selected — arrows nudge · right-click layers · Lock / Match.`
         : "Selection cleared."
     );
     return;
@@ -488,6 +532,7 @@ function onThumbClick(id, e = null) {
   if (selection.includes(id) && selection.length === 1) {
     selection = [];
     renderThumbs();
+    refreshAllPreviews();
     setStatus("Selection cleared. Click tiles to select, or drag onto a workspace.");
     return;
   }
@@ -495,20 +540,22 @@ function onThumbClick(id, e = null) {
   if (selection.length === 1 && selection[0] !== id) {
     selection = [selection[0], id];
     renderThumbs();
+    refreshAllPreviews();
     runPairMatch(selection[0], selection[1]);
     return;
   }
 
   selection = [id];
   renderThumbs();
+  refreshAllPreviews();
   const idx = indexById(id);
   const placed = tileGroup.has(idx);
   setStatus(
     placed
       ? lockedIds.has(id)
-        ? "Locked tile selected — Unlock to re-drag, or Ctrl+click more to Unlock/Return."
-        : "Placed tile selected — drag to re-fit, Ctrl+click to multi-select, or click another to match."
-      : "Select a second overlapping image (or drag this one onto a workspace)."
+        ? "Locked tile selected — Unlock to re-drag; arrows disabled until Unlock."
+        : "Selected — yellow outline · arrows nudge (Shift=10px) · right-click layers · ]/[."
+      : "Selected — drag onto a workspace, or click another to Match."
   );
 }
 
@@ -540,8 +587,8 @@ async function runPairMatch(idA, idB) {
       applyJoin({
         paneId,
         targetGroupId: null,
-        abs: new Map([[iA, { dx: 0, dy: 0 }]]),
-        place: { index: iB, dx: hit.dx, dy: hit.dy },
+        abs: new Map([[iA, { dx: 0, dy: 0, z: 0 }]]),
+        place: { index: iB, dx: hit.dx, dy: hit.dy, z: 1 },
         score: hit.score,
         edge: hit.edge,
       });
@@ -632,8 +679,13 @@ function applyJoin(spec) {
     const target = groups.get(spec.targetGroupId);
     const other = groups.get(spec.mergeGroupId);
     const delta = spec.mergeDelta;
+    const zOff = maxZInGroup(spec.targetGroupId) + 1;
     for (const [ti, pos] of other) {
-      target.set(ti, { dx: pos.dx + delta.dx, dy: pos.dy + delta.dy });
+      target.set(ti, {
+        dx: pos.dx + delta.dx,
+        dy: pos.dy + delta.dy,
+        z: zOff + (pos.z ?? 0),
+      });
       tileGroup.set(ti, spec.targetGroupId);
     }
     groups.delete(spec.mergeGroupId);
@@ -643,14 +695,26 @@ function applyJoin(spec) {
     panes[paneId].groupId = spec.targetGroupId;
   } else if (!spec.targetGroupId && spec.abs && spec.place) {
     const gid = `G${nextGroup++}`;
-    const abs = new Map(spec.abs);
-    abs.set(spec.place.index, { dx: spec.place.dx, dy: spec.place.dy });
+    const abs = new Map();
+    let z = 0;
+    for (const [ti, pos] of spec.abs) {
+      abs.set(ti, { dx: pos.dx, dy: pos.dy, z: pos.z ?? z++ });
+    }
+    abs.set(spec.place.index, {
+      dx: spec.place.dx,
+      dy: spec.place.dy,
+      z: spec.place.z ?? z,
+    });
     groups.set(gid, abs);
     for (const ti of abs.keys()) tileGroup.set(ti, gid);
     panes[paneId].groupId = gid;
   } else if (spec.targetGroupId && spec.place) {
     const abs = groups.get(spec.targetGroupId);
-    abs.set(spec.place.index, { dx: spec.place.dx, dy: spec.place.dy });
+    const prev = abs.get(spec.place.index);
+    const z =
+      spec.place.z ??
+      (spec.realign && prev ? prev.z ?? 0 : nextZForGroup(spec.targetGroupId));
+    abs.set(spec.place.index, { dx: spec.place.dx, dy: spec.place.dy, z });
     tileGroup.set(spec.place.index, spec.targetGroupId);
     panes[paneId].groupId = spec.targetGroupId;
   }
@@ -786,12 +850,117 @@ function absWithoutTile(gid, excludeIndex) {
   return abs;
 }
 
+function maxZInGroup(gid) {
+  const abs = groups.get(gid);
+  if (!abs?.size) return 0;
+  let m = 0;
+  for (const pos of abs.values()) m = Math.max(m, pos.z ?? 0);
+  return m;
+}
+
+function nextZForGroup(gid) {
+  return maxZInGroup(gid) + 1;
+}
+
+/** @returns {number[]} tile indices sorted back→front */
+function layerStack(gid) {
+  const abs = groups.get(gid);
+  if (!abs) return [];
+  return [...abs.entries()]
+    .sort((a, b) => (a[1].z ?? 0) - (b[1].z ?? 0) || a[0] - b[0])
+    .map(([i]) => i);
+}
+
+function reindexLayers(gid, orderedIndices) {
+  const abs = groups.get(gid);
+  if (!abs) return;
+  orderedIndices.forEach((idx, i) => {
+    const pos = abs.get(idx);
+    if (pos) pos.z = i;
+  });
+}
+
+/**
+ * @param {"front" | "forward" | "backward" | "back"} action
+ */
+function changeLayerOrder(action) {
+  const idxs = selection
+    .map((id) => indexById(id))
+    .filter((i) => i >= 0 && tileGroup.has(i));
+  if (!idxs.length) {
+    setStatus("Select a placed tile to change layer order.", "error");
+    return;
+  }
+  const byGroup = new Map();
+  for (const i of idxs) {
+    const gid = tileGroup.get(i);
+    if (!byGroup.has(gid)) byGroup.set(gid, []);
+    byGroup.get(gid).push(i);
+  }
+  pushHistory();
+  for (const [gid, selected] of byGroup) {
+    let stack = layerStack(gid);
+    const sel = new Set(selected);
+    if (action === "front") {
+      const rest = stack.filter((i) => !sel.has(i));
+      stack = [...rest, ...stack.filter((i) => sel.has(i))];
+    } else if (action === "back") {
+      const rest = stack.filter((i) => !sel.has(i));
+      stack = [...stack.filter((i) => sel.has(i)), ...rest];
+    } else if (action === "forward") {
+      for (let i = stack.length - 2; i >= 0; i--) {
+        if (sel.has(stack[i]) && !sel.has(stack[i + 1])) {
+          const t = stack[i];
+          stack[i] = stack[i + 1];
+          stack[i + 1] = t;
+        }
+      }
+    } else if (action === "backward") {
+      for (let i = 1; i < stack.length; i++) {
+        if (sel.has(stack[i]) && !sel.has(stack[i - 1])) {
+          const t = stack[i];
+          stack[i] = stack[i - 1];
+          stack[i - 1] = t;
+        }
+      }
+    }
+    reindexLayers(gid, stack);
+  }
+  refreshAllPreviews();
+  renderThumbs();
+  updateButtons();
+  setStatus(`Layer ${action === "front" || action === "forward" ? "raised" : "lowered"}.`);
+}
+
+function nudgeSelected(dx, dy) {
+  const idxs = selection
+    .map((id) => indexById(id))
+    .filter((i) => i >= 0 && tileGroup.has(i) && !lockedIds.has(tiles[i].id));
+  if (!idxs.length) {
+    setStatus("Select an unlocked placed tile, then use arrow keys to nudge.", "error");
+    return false;
+  }
+  if (nudgeHistoryArmed) {
+    pushHistory();
+    nudgeHistoryArmed = false;
+  }
+  for (const i of idxs) {
+    const pos = groups.get(tileGroup.get(i)).get(i);
+    pos.dx += dx;
+    pos.dy += dy;
+  }
+  refreshAllPreviews();
+  updateCounts();
+  setStatus(`Nudged ${idxs.length} tile${idxs.length === 1 ? "" : "s"} by ${dx || dy}px.`);
+  return true;
+}
+
 function snapshotPlacementsById() {
-  /** @type {Map<string, { gid: string, dx: number, dy: number }>} */
+  /** @type {Map<string, { gid: string, dx: number, dy: number, z?: number }>} */
   const placements = new Map();
   for (const [gid, abs] of groups) {
     for (const [idx, pos] of abs) {
-      placements.set(tiles[idx].id, { gid, dx: pos.dx, dy: pos.dy });
+      placements.set(tiles[idx].id, { gid, dx: pos.dx, dy: pos.dy, z: pos.z ?? 0 });
     }
   }
   return placements;
@@ -804,17 +973,17 @@ function restorePlacementsById(placements) {
     const idx = indexById(id);
     if (idx < 0) continue;
     if (!groups.has(p.gid)) groups.set(p.gid, new Map());
-    groups.get(p.gid).set(idx, { dx: p.dx, dy: p.dy });
+    groups.get(p.gid).set(idx, { dx: p.dx, dy: p.dy, z: p.z ?? 0 });
     tileGroup.set(idx, p.gid);
   }
 }
 
 function pushHistory() {
   const placements = snapshotPlacementsById();
-  /** @type {Map<string, { gid: string, dx: number, dy: number }>} */
+  /** @type {Map<string, { gid: string, dx: number, dy: number, z?: number }>} */
   const clone = new Map();
   for (const [id, p] of placements) {
-    clone.set(id, { gid: p.gid, dx: p.dx, dy: p.dy });
+    clone.set(id, { gid: p.gid, dx: p.dx, dy: p.dy, z: p.z ?? 0 });
   }
   history.push({
     placements: clone,
@@ -851,6 +1020,11 @@ function undoLast() {
 
 window.addEventListener("keydown", (e) => {
   if (e.target && ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
+  if (e.code === "Space") {
+    spaceHeld = true;
+    e.preventDefault();
+    return;
+  }
   const key = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && key === "z") {
     e.preventDefault();
@@ -864,6 +1038,22 @@ window.addEventListener("keydown", (e) => {
     }
     return;
   }
+  if (key === "arrowleft" || key === "arrowright" || key === "arrowup" || key === "arrowdown") {
+    const step = e.shiftKey ? 10 : 1;
+    let dx = 0;
+    let dy = 0;
+    if (key === "arrowleft") dx = -step;
+    if (key === "arrowright") dx = step;
+    if (key === "arrowup") dy = -step;
+    if (key === "arrowdown") dy = step;
+    if (nudgeSelected(dx, dy)) e.preventDefault();
+    return;
+  }
+  if ((key === "]" || key === "[") && selection.length) {
+    e.preventDefault();
+    changeLayerOrder(key === "]" ? (e.shiftKey ? "front" : "forward") : e.shiftKey ? "back" : "backward");
+    return;
+  }
   if (key === "l" && !lockBtn.disabled) {
     e.preventDefault();
     lockSelected();
@@ -871,6 +1061,11 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault();
     unlockSelected();
   }
+});
+
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") spaceHeld = false;
+  if (e.key.startsWith("Arrow")) nudgeHistoryArmed = true;
 });
 
 function reorderThumbs(fromId, beforeId) {
@@ -1447,7 +1642,7 @@ async function finishDragPlace(movingIndex, paneId, frozenPose) {
         unplaceByIds([tiles[movingIndex].id], { recordHistory: false });
       }
       const newG = `G${nextGroup++}`;
-      groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0 }]]));
+      groups.set(newG, new Map([[movingIndex, { dx: 0, dy: 0, z: 0 }]]));
       tileGroup.set(movingIndex, newG);
       panes[paneId].groupId = newG;
       selection = [tiles[movingIndex].id];
@@ -1469,7 +1664,7 @@ async function finishDragPlace(movingIndex, paneId, frozenPose) {
     const baseAbs = realigning ? absWithoutTile(gid, movingIndex) : new Map(groups.get(gid));
     if (!baseAbs.size) {
       if (!(wasInGroup && wasInGroup !== gid)) pushHistory();
-      groups.get(gid).set(movingIndex, { dx: 0, dy: 0 });
+      groups.get(gid).set(movingIndex, { dx: 0, dy: 0, z: 0 });
       tileGroup.set(movingIndex, gid);
       selection = [tiles[movingIndex].id];
       refreshAllPreviews();
@@ -1737,7 +1932,7 @@ function hitTestPaneTile(paneId, clientX, clientY) {
   const abs = groups.get(gid);
   const { origin } = compositeMontage(tiles, abs, null);
   const entries = [...abs.entries()].sort(
-    (a, b) => b[1].dx + b[1].dy - (a[1].dx + a[1].dy)
+    (a, b) => (b[1].z ?? 0) - (a[1].z ?? 0) || b[0] - a[0]
   );
   for (const [i, pos] of entries) {
     const x = pos.dx - origin.minX;
@@ -1750,17 +1945,26 @@ function hitTestPaneTile(paneId, clientX, clientY) {
   return null;
 }
 
-let spaceHeld = false;
+function hideTileMenu() {
+  if (tileMenu) tileMenu.hidden = true;
+}
 
-window.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && e.target && !["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) {
-    spaceHeld = true;
-    e.preventDefault();
+function showTileMenu(clientX, clientY, id) {
+  if (!tileMenu) return;
+  if (id && !selection.includes(id)) {
+    selection = [id];
+    renderThumbs();
+    refreshAllPreviews();
   }
-});
-window.addEventListener("keyup", (e) => {
-  if (e.code === "Space") spaceHeld = false;
-});
+  tileMenu.hidden = false;
+  const pad = 8;
+  const menuW = tileMenu.offsetWidth || 180;
+  const menuH = tileMenu.offsetHeight || 160;
+  const x = Math.min(clientX, window.innerWidth - menuW - pad);
+  const y = Math.min(clientY, window.innerHeight - menuH - pad);
+  tileMenu.style.left = `${Math.max(pad, x)}px`;
+  tileMenu.style.top = `${Math.max(pad, y)}px`;
+}
 
 function startPan(e, paneId) {
   const p = panes[paneId];
@@ -1827,6 +2031,7 @@ function bindPaneInteraction(paneId) {
   });
 
   p.canvas.addEventListener("pointerdown", (e) => {
+    hideTileMenu();
     if (e.button === 1 || e.altKey || (e.button === 0 && spaceHeld)) {
       e.preventDefault();
       e.stopPropagation();
@@ -1854,12 +2059,14 @@ function bindPaneInteraction(paneId) {
       if (selection.includes(id)) selection = selection.filter((x) => x !== id);
       else selection.push(id);
       renderThumbs();
-      setStatus(`${selection.length} selected from montage.`);
+      refreshAllPreviews();
+      setStatus(`${selection.length} selected — arrows nudge · right-click layers.`);
       return;
     }
 
     selection = [id];
     renderThumbs();
+    refreshAllPreviews();
     if (lockedIds.has(id)) {
       // Locked tile: pan the view instead of moving the photo
       e.preventDefault();
@@ -1871,6 +2078,17 @@ function bindPaneInteraction(paneId) {
     e.preventDefault();
     e.stopPropagation();
     startDrag(e, hit, p.canvas, grabOffsetFromPane(paneId, hit, e.clientX, e.clientY));
+  });
+
+  p.canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    setFocusedPane(paneId);
+    const hit = hitTestPaneTile(paneId, e.clientX, e.clientY);
+    if (hit == null) {
+      hideTileMenu();
+      return;
+    }
+    showTileMenu(e.clientX, e.clientY, tiles[hit].id);
   });
 }
 
@@ -1913,13 +2131,41 @@ lockBtn.addEventListener("click", lockSelected);
 unlockBtn.addEventListener("click", unlockSelected);
 returnBtn.addEventListener("click", returnSelectedToRail);
 workspace2Btn.addEventListener("click", toggleWorkspaceB);
+railPinBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleRailPinned();
+});
 
+tileMenu?.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-action]");
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  hideTileMenu();
+  if (action === "front" || action === "forward" || action === "backward" || action === "back") {
+    changeLayerOrder(action);
+  }
+});
+
+document.addEventListener("pointerdown", (e) => {
+  if (!tileMenu || tileMenu.hidden) return;
+  if (tileMenu.contains(e.target)) return;
+  hideTileMenu();
+});
+
+window.addEventListener("blur", hideTileMenu);
 window.addEventListener("resize", () => {
+  hideTileMenu();
   // Preserve zoom/pan — only re-apply current scale after layout
   for (const id of /** @type {const} */ (["a", "b"])) {
     applyPaneZoom(id);
   }
 });
+
+try {
+  setRailPinned(localStorage.getItem("photostitch-rail-pinned") === "1");
+} catch (_) {
+  setRailPinned(false);
+}
 
 setWorkspaceBVisible(false);
 setFocusedPane("a");

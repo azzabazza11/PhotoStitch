@@ -675,10 +675,11 @@ export function snapNearOffset(reference, moving, guessDx, guessDy, options = {}
 
 /**
  * @param {Tile[]} tiles
- * @param {Map<number, { dx: number, dy: number }>} abs
+ * @param {Map<number, { dx: number, dy: number, z?: number }>} abs
  * @param {{ index: number, dx: number, dy: number } | null} pending
+ * @param {{ selectedIds?: Set<string> }} [options]
  */
-export function compositeMontage(tiles, abs, pending = null) {
+export function compositeMontage(tiles, abs, pending = null, options = {}) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -708,9 +709,12 @@ export function compositeMontage(tiles, abs, pending = null) {
   canvas.height = outH;
   const ctx = canvas.getContext("2d");
 
-  const drawOrder = [...abs.entries()].sort(
-    (a, b) => a[1].dx + a[1].dy - (b[1].dx + b[1].dy)
-  );
+  const drawOrder = [...abs.entries()].sort((a, b) => {
+    const za = a[1].z ?? 0;
+    const zb = b[1].z ?? 0;
+    if (za !== zb) return za - zb;
+    return a[0] - b[0];
+  });
   /** @type {{ id: string, dx: number, dy: number }[]} */
   const placed = [];
   for (const [i, p] of drawOrder) {
@@ -735,6 +739,22 @@ export function compositeMontage(tiles, abs, pending = null) {
     ctx.strokeRect(x + 1, y + 1, t.width - 2, t.height - 2);
     ctx.restore();
     pendingRect = { x, y, w: t.width, h: t.height, id: t.id };
+  }
+
+  // 1px yellow selection outline (on top of stack)
+  const selectedIds = options.selectedIds;
+  if (selectedIds && selectedIds.size) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "#f5e26b";
+    for (const [i, p] of drawOrder) {
+      if (!selectedIds.has(tiles[i].id)) continue;
+      const x = p.dx - minX;
+      const y = p.dy - minY;
+      ctx.strokeRect(x + 0.5, y + 0.5, tiles[i].width - 1, tiles[i].height - 1);
+    }
+    ctx.restore();
   }
 
   return { canvas, placed, pendingRect, origin: { minX, minY } };

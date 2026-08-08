@@ -178,15 +178,14 @@ button:not(:disabled):hover {
   border-color: rgba(240, 160, 144, 0.45);
 }
 
-/* —— Main grid: rail + work (rail expands as overlay; montage stays put) —— */
+/* —— Main grid: rail + work (rail opens by pushing the montage, not covering it) —— */
 .workspace-grid {
   display: grid;
-  grid-template-columns: var(--rail-collapsed) 1fr;
+  grid-template-columns: auto 1fr;
   gap: 0.65rem;
   min-height: 0;
   height: 100%;
-  /* Keep columns fixed so the work column never shifts */
-  overflow: visible;
+  overflow: hidden;
 }
 
 .photo-rail {
@@ -198,30 +197,68 @@ button:not(:disabled):hover {
   height: 100%;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: rgba(15, 26, 20, 0.92);
+  background: rgba(15, 26, 20, 0.96);
   overflow: hidden;
-  z-index: 20;
-  transition: width 0.65s ease, box-shadow 0.65s ease;
+  z-index: 5;
+  transition: width 0.2s ease;
+  display: grid;
+  grid-template-rows: auto 1fr;
 }
 
 body:not(.dragging-over-work) .photo-rail:hover,
 body.rail-pinned .photo-rail,
 body.dragging-tile:not(.dragging-over-work) .photo-rail {
   width: var(--rail-expanded);
-  box-shadow: 12px 0 28px rgba(0, 0, 0, 0.4);
 }
 
 body.dragging-over-work .photo-rail {
   width: var(--rail-collapsed);
-  box-shadow: none;
   pointer-events: none;
 }
 
+.rail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  padding: 0.35rem 0.4rem 0.15rem;
+  min-height: 1.75rem;
+}
+
+.rail-toolbar-label {
+  margin: 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .rail-toolbar-label {
+  display: none;
+}
+
+#railPinBtn {
+  flex: 0 0 auto;
+  min-width: 2rem;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+#railPinBtn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+
 .rail-inner {
+  min-height: 0;
   height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 0.55rem;
+  padding: 0.35rem 0.55rem 0.55rem;
   scrollbar-width: thin;
   scrollbar-color: var(--accent) transparent;
   scroll-behavior: smooth;
@@ -236,6 +273,10 @@ body.dragging-over-work .photo-rail {
   background: linear-gradient(180deg, transparent, var(--accent), transparent);
   opacity: 0.35;
   pointer-events: none;
+}
+
+body.rail-pinned .rail-edge {
+  opacity: 0.7;
 }
 
 .rail-drop.drop {
@@ -316,8 +357,8 @@ body.dragging-over-work .photo-rail {
 }
 
 .thumb-wrap.selected {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 1px solid #f5e26b;
+  outline-offset: 1px;
 }
 
 .thumb-wrap.locked .thumb {
@@ -606,6 +647,53 @@ body.dragging-over-work .thumb {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
+.tile-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 11.5rem;
+  padding: 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(15, 26, 20, 0.96);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.tile-menu[hidden] {
+  display: none;
+}
+
+.tile-menu button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  padding: 0.4rem 0.55rem;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.tile-menu button:hover:not(:disabled) {
+  background: rgba(196, 232, 106, 0.16);
+}
+
+.tile-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+  font-size: 0.72rem;
+}
+
+.tile-menu hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 0.2rem 0.25rem;
+}
+
 footer {
   color: var(--muted);
   font-size: 0.78rem;
@@ -643,7 +731,12 @@ footer p {
     width: 100%;
     min-width: 0;
     max-height: 32vh;
-    box-shadow: none;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .rail-toolbar-label {
+    display: block;
   }
 
   .thumbs {

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=21" />
+  <link rel="stylesheet" href="styles.css?v=23" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -53,6 +53,10 @@
 
     <div class="workspace-grid">
       <aside id="photoRail" class="photo-rail" aria-label="Photo library">
+        <div class="rail-toolbar">
+          <p class="rail-toolbar-label">Photos</p>
+          <button type="button" id="railPinBtn" class="ghost" aria-pressed="false" title="Keep photo pane open">Pin</button>
+        </div>
         <div class="rail-inner">
           <section
             id="drop"
@@ -122,11 +126,19 @@
     </div>
 
     <footer>
-      <p><span id="appVersionFooter">v?</span> · Align by eye while dragging (meter + tint) · drop places exactly there · Match for auto-align · scroll zooms · drag empty / Space to pan · Undo Ctrl+Z</p>
+      <p><span id="appVersionFooter">v?</span> · Click select (yellow outline) · arrows nudge · right-click layers · drop places exactly · Match · scroll zoom · Space pan · Undo Ctrl+Z</p>
     </footer>
   </div>
 
   <div id="dragGhost" class="drag-ghost" hidden></div>
-  <script type="module" src="app.js?v=21"></script>
+  <div id="tileMenu" class="tile-menu" hidden role="menu" aria-label="Tile actions">
+    <button type="button" role="menuitem" data-action="front">Bring to front</button>
+    <button type="button" role="menuitem" data-action="forward">Bring forward</button>
+    <button type="button" role="menuitem" data-action="backward">Send backward</button>
+    <button type="button" role="menuitem" data-action="back">Send to back</button>
+    <hr />
+    <button type="button" role="menuitem" data-action="nudge-hint" disabled>Arrows nudge · Shift=10px</button>
+  </div>
+  <script type="module" src="app.js?v=23"></script>
 </body>
 </html>
