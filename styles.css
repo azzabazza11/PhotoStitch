@@ -333,8 +333,11 @@ body.dragging-over-work .photo-rail {
 .thumb {
   display: block;
   width: 100%;
-  height: var(--thumb-size);
-  object-fit: cover;
+  height: auto;
+  max-height: min(42vh, calc(var(--thumb-size) * 1.85));
+  object-fit: contain;
+  object-position: center;
+  background: rgba(10, 18, 14, 0.85);
   border-radius: 10px;
   border: 1px solid var(--line);
 }
@@ -382,6 +385,8 @@ body.dragging-over-work .group-badge {
 body:not(.dragging-tile):not(.dragging-over-work):not(.rail-pinned) .workspace-grid:not(:has(.photo-rail:hover)) .thumb,
 body.dragging-over-work .thumb {
   height: 58px;
+  max-height: 58px;
+  object-fit: contain;
 }
 
 .work-column {
@@ -655,6 +660,9 @@ footer p {
   .thumb-wrap .thumb,
   .thumb {
     width: var(--thumb-size);
+    height: auto;
+    max-height: var(--thumb-size);
+    object-fit: contain;
   }
 
   .panes {

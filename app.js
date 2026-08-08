@@ -7,10 +7,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=19";
+} from "./stitcher.js?v=20";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "19";
+const APP_VERSION = "20";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
