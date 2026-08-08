@@ -7,10 +7,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=20";
+} from "./stitcher.js?v=21";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "20";
+const APP_VERSION = "21";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -153,6 +153,12 @@ let dragBaseOrigin = null;
 let dragPad = { x: 0, y: 0 };
 /** @type {"a" | "b" | null} */
 let dragTargetPane = null;
+/**
+ * Exact absolute place pose while dragging (matches live preview).
+ * Frozen at pointerup before UI teardown so layout shifts cannot skew the drop.
+ * @type {{ paneId: "a" | "b", dx: number, dy: number } | null}
+ */
+let dragLastPose = null;
 let dragScoreTimer = 0;
 /** @type {HTMLCanvasElement | null} */
 let agreementCanvas = null;
@@ -988,15 +994,32 @@ function prepareDragBase(paneId, movingIndex = -1) {
   return gid;
 }
 
+/**
+ * Map screen pointer → canvas pixel coords using the same pan/zoom as the stage
+ * transform (not getBoundingClientRect on the bitmap, which drifts with subpixels).
+ */
 function canvasPointerToLocal(p, clientX, clientY) {
-  const rect = p.canvas.getBoundingClientRect();
-  if (rect.width < 8 || rect.height < 8) return null;
-  const scaleX = p.canvas.width / rect.width;
-  const scaleY = p.canvas.height / rect.height;
+  const wrapRect = p.wrap.getBoundingClientRect();
+  if (wrapRect.width < 8 || wrapRect.height < 8) return null;
+  const zoom = p.zoom || 1;
   return {
-    localX: (clientX - rect.left) * scaleX,
-    localY: (clientY - rect.top) * scaleY,
-    rect,
+    localX: (clientX - wrapRect.left - p.panX) / zoom,
+    localY: (clientY - wrapRect.top - p.panY) / zoom,
+    rect: wrapRect,
+  };
+}
+
+/** Absolute group pose for the moving tile under the pointer (matches live preview). */
+function poseFromPointer(paneId, clientX, clientY) {
+  if (!dragBaseOrigin) return null;
+  const mapped = canvasPointerToLocal(panes[paneId], clientX, clientY);
+  if (!mapped) return null;
+  const padX = dragPad.x || 0;
+  const padY = dragPad.y || 0;
+  return {
+    paneId,
+    dx: dragBaseOrigin.minX + mapped.localX - dragGrab.x - padX,
+    dy: dragBaseOrigin.minY + mapped.localY - dragGrab.y - padY,
   };
 }
 
@@ -1040,6 +1063,14 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
   if (!mapped) return false;
   const drawX = mapped.localX - dragGrab.x;
   const drawY = mapped.localY - dragGrab.y;
+  const coreX = drawX - dragPad.x;
+  const coreY = drawY - dragPad.y;
+  // Hard-wire place pose to what is drawn — drop must use this exact pose
+  dragLastPose = {
+    paneId,
+    dx: dragBaseOrigin.minX + coreX,
+    dy: dragBaseOrigin.minY + coreY,
+  };
 
   const ctx = p.canvas.getContext("2d");
   ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
@@ -1058,9 +1089,6 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
   ctx.setLineDash([8, 5]);
   ctx.strokeRect(drawX + 1, drawY + 1, tiles[movingIndex].width - 2, tiles[movingIndex].height - 2);
   ctx.restore();
-
-  const coreX = drawX - dragPad.x;
-  const coreY = drawY - dragPad.y;
 
   const now = performance.now();
   if (now - dragScoreTimer < 120) return true;
@@ -1099,6 +1127,7 @@ function clearMontageDragPreview() {
   dragBaseOrigin = null;
   dragPad = { x: 0, y: 0 };
   dragGrab = { x: 0, y: 0 };
+  dragLastPose = null;
   dragScoreTimer = 0;
   dragTargetPane = null;
   for (const p of Object.values(panes)) p.el.classList.remove("drop-hot");
@@ -1111,9 +1140,15 @@ function grabOffsetFromThumb(wrap, tileIndex, clientX, clientY) {
   if (r.width < 1 || r.height < 1) {
     return { x: t.width / 2, y: t.height / 2 };
   }
+  // object-fit: contain — map into the drawn image box, not the letterboxed element
+  const scale = Math.min(r.width / t.width, r.height / t.height);
+  const drawnW = t.width * scale;
+  const drawnH = t.height * scale;
+  const offX = (r.width - drawnW) / 2;
+  const offY = (r.height - drawnH) / 2;
   return {
-    x: Math.max(0, Math.min(t.width, ((clientX - r.left) / r.width) * t.width)),
-    y: Math.max(0, Math.min(t.height, ((clientY - r.top) / r.height) * t.height)),
+    x: Math.max(0, Math.min(t.width, (clientX - r.left - offX) / scale)),
+    y: Math.max(0, Math.min(t.height, (clientY - r.top - offY) / scale)),
   };
 }
 
@@ -1299,32 +1334,30 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
     window.removeEventListener("pointercancel", onUp);
-    dragGhost.hidden = true;
-    clearDropHighlights();
-    hideLiveConf();
-    document.body.classList.remove("dragging-tile", "dragging-over-work");
-    photoRail.style.pointerEvents = "";
 
     const i = dragIndex;
     dragIndex = null;
     pointerId = null;
 
     if (!dragMoved) {
+      dragGhost.hidden = true;
+      clearDropHighlights();
+      hideLiveConf();
+      document.body.classList.remove("dragging-tile", "dragging-over-work");
+      photoRail.style.pointerEvents = "";
       clearMontageDragPreview();
       return;
     }
 
-    // Prefer montage — last pane under cursor during drag as fallback
+    // Freeze placement WHILE drag layout is still intact (before rail/live-conf teardown)
     const overPane = paneAtPoint(ev.clientX, ev.clientY) || dragLastPane;
-    if (overPane) {
-      setFocusedPane(overPane);
-      const target = panes[overPane];
-      const rect = (target.canvas.width ? target.canvas : target.wrap).getBoundingClientRect();
-      setStatus(`Placing in Workspace ${overPane.toUpperCase()}…`, "busy");
-      finishDragPlace(i, ev.clientX, ev.clientY, rect, overPane).finally(() => {
-        clearMontageDragPreview();
-      });
-      return;
+    let frozenPose = null;
+    if (overPane && dragBaseOrigin) {
+      // Final preview frame at release point, then read that pose
+      if (dragBaseCanvas) updateMontageDragPreview(i, ev.clientX, ev.clientY, overPane);
+      frozenPose =
+        (dragLastPose && dragLastPose.paneId === overPane ? dragLastPose : null) ||
+        poseFromPointer(overPane, ev.clientX, ev.clientY);
     }
 
     const inRail = overRailColumn(ev.clientX, ev.clientY);
@@ -1335,6 +1368,21 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
       ev.clientX <= dropRect.right &&
       ev.clientY >= dropRect.top &&
       ev.clientY <= dropRect.bottom;
+
+    dragGhost.hidden = true;
+    clearDropHighlights();
+    hideLiveConf();
+    document.body.classList.remove("dragging-tile", "dragging-over-work");
+    photoRail.style.pointerEvents = "";
+
+    if (overPane) {
+      setFocusedPane(overPane);
+      setStatus(`Placing in Workspace ${overPane.toUpperCase()}…`, "busy");
+      finishDragPlace(i, overPane, frozenPose).finally(() => {
+        clearMontageDragPreview();
+      });
+      return;
+    }
 
     if (tileGroup.has(i) && (overDropZone || (inRail && !hover))) {
       clearMontageDragPreview();
@@ -1376,10 +1424,12 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
 }
 
 /**
- * Place the tile exactly where dropped — no auto-snap.
- * Live alignment meter + agreement tint guide the user while dragging.
+ * Place the tile at the frozen preview pose — no remapping, no auto-snap.
+ * @param {number} movingIndex
+ * @param {"a" | "b"} paneId
+ * @param {{ paneId: "a" | "b", dx: number, dy: number } | null} frozenPose
  */
-async function finishDragPlace(movingIndex, clientX, clientY, rect, paneId) {
+async function finishDragPlace(movingIndex, paneId, frozenPose) {
   busy = true;
   updateButtons();
   setStatus("Placing…", "busy");
@@ -1430,26 +1480,20 @@ async function finishDragPlace(movingIndex, clientX, clientY, rect, paneId) {
       return;
     }
 
-    const { origin } = compositeMontage(tiles, baseAbs, null);
+    if (!frozenPose) {
+      setStatus("Drop lost its place pose — drag again and release on the montage.", "error");
+      refreshAllPreviews();
+      return;
+    }
 
-    const p = panes[paneId];
-    const liveRect = p.canvas.width ? p.canvas.getBoundingClientRect() : rect;
-    const padX = dragPad.x || p.padX || 0;
-    const padY = dragPad.y || p.padY || 0;
-    const scaleX = (p.canvas.width || 1) / Math.max(1, liveRect.width);
-    const scaleY = (p.canvas.height || 1) / Math.max(1, liveRect.height);
-    const localX = (clientX - liveRect.left) * scaleX - padX;
-    const localY = (clientY - liveRect.top) * scaleY - padY;
+    // Exact pixels from the live preview — never re-derive from screen coords after layout changes
+    const placeDx = frozenPose.dx;
+    const placeDy = frozenPose.dy;
 
-    // Exact drop position using grab offset (no center-to-mouse jump)
-    const placeDx = origin.minX + localX - dragGrab.x;
-    const placeDy = origin.minY + localY - dragGrab.y;
-
-    // Score at drop for feedback only (does not move the tile)
     let scoreNote = "";
-    if (dragCoreCanvas) {
-      const coreX = localX - dragGrab.x;
-      const coreY = localY - dragGrab.y;
+    if (dragCoreCanvas && dragBaseOrigin) {
+      const coreX = placeDx - dragBaseOrigin.minX;
+      const coreY = placeDy - dragBaseOrigin.minY;
       const scored = scoreOverlapAt(dragCoreCanvas, tiles[movingIndex], coreX, coreY);
       if (scored.area >= 24 * 24) {
         scoreNote = ` Alignment ${scored.score.toFixed(2)}.`;
@@ -1464,7 +1508,7 @@ async function finishDragPlace(movingIndex, clientX, clientY, rect, paneId) {
       place: { index: movingIndex, dx: placeDx, dy: placeDy },
       realign: realigning,
       skipHistory: alreadyHistoric,
-      message: `${realigning ? "Re-placed" : "Placed"} at your drop.${scoreNote} Drag again to nudge, Match to auto-align, or Lock.`,
+      message: `${realigning ? "Re-placed" : "Placed"} exactly where released.${scoreNote} Drag again to nudge, Match to auto-align, or Lock.`,
     });
   } finally {
     busy = false;
