@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=25" />
+  <link rel="stylesheet" href="styles.css?v=26" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -21,12 +21,8 @@
         <p class="tag">Photos left · workspace right. Toggle a second workspace when you need another montage.</p>
       </div>
       <section class="controls" aria-label="Stitch settings">
-        <label class="field">
-          <span>Crop</span>
-          <input id="crop" type="number" min="0" max="400" step="1" value="0" title="Pixels trimmed from each edge — apply to selected photos" />
-        </label>
         <div class="actions">
-          <button type="button" id="cropApplyBtn" class="ghost" disabled title="Apply crop to selected photos (undoable)">Crop sel</button>
+          <button type="button" id="cropEditBtn" class="ghost" disabled title="Adjust crop on the selected montage tile">Crop</button>
           <button type="button" id="restoreBtn" class="ghost" hidden title="Reload last autosaved session">Restore</button>
           <button type="button" id="workspace2Btn" class="ghost" aria-pressed="false" title="Show or hide Workspace B">+ Workspace</button>
           <button type="button" id="matchBtn" class="ghost" disabled>Match</button>
@@ -124,12 +120,15 @@
     </div>
 
     <footer>
-      <p><span id="appVersionFooter">v?</span> · Autosaves locally · Crop sel on selected · arrows nudge · right-click layers · Undo Ctrl+Z</p>
+      <p><span id="appVersionFooter">v?</span> · Crop on montage (edges/corners) · right-click Uncrop · autosave · arrows nudge · Undo Ctrl+Z</p>
     </footer>
   </div>
 
   <div id="dragGhost" class="drag-ghost" hidden></div>
   <div id="tileMenu" class="tile-menu" hidden role="menu" aria-label="Tile actions">
+    <button type="button" role="menuitem" data-action="crop">Adjust crop…</button>
+    <button type="button" role="menuitem" data-action="uncrop" hidden>Uncrop</button>
+    <hr />
     <button type="button" role="menuitem" data-action="front">Bring to front</button>
     <button type="button" role="menuitem" data-action="forward">Bring forward</button>
     <button type="button" role="menuitem" data-action="backward">Send backward</button>
@@ -137,6 +136,22 @@
     <hr />
     <button type="button" role="menuitem" data-action="nudge-hint" disabled>Arrows nudge · Shift=10px</button>
   </div>
-  <script type="module" src="app.js?v=25"></script>
+  <div id="cropHud" class="crop-hud" hidden>
+    <div id="cropFrame" class="crop-frame" aria-hidden="true">
+      <span class="crop-handle" data-h="nw"></span>
+      <span class="crop-handle" data-h="n"></span>
+      <span class="crop-handle" data-h="ne"></span>
+      <span class="crop-handle" data-h="e"></span>
+      <span class="crop-handle" data-h="se"></span>
+      <span class="crop-handle" data-h="s"></span>
+      <span class="crop-handle" data-h="sw"></span>
+      <span class="crop-handle" data-h="w"></span>
+    </div>
+    <div class="crop-hud-bar">
+      <button type="button" id="cropHudApply">Apply crop</button>
+      <button type="button" id="cropHudCancel" class="ghost">Cancel</button>
+    </div>
+  </div>
+  <script type="module" src="app.js?v=26"></script>
 </body>
 </html>

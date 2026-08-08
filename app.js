@@ -1,16 +1,17 @@
 import {
   cropImage,
-  effectiveCrop,
+  normalizeCrop,
+  isCropped,
   matchTwoTiles,
   scoreOverlapAt,
   paintAgreementOverlay,
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=25";
+} from "./stitcher.js?v=26";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "25";
+const APP_VERSION = "26";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -36,8 +37,7 @@ const lockBtn = document.getElementById("lockBtn");
 const unlockBtn = document.getElementById("unlockBtn");
 const returnBtn = document.getElementById("returnBtn");
 const panesEl = document.getElementById("panes");
-const cropInput = document.getElementById("crop");
-const cropApplyBtn = document.getElementById("cropApplyBtn");
+const cropEditBtn = document.getElementById("cropEditBtn");
 const restoreBtn = document.getElementById("restoreBtn");
 const thresholdInput = document.getElementById("threshold");
 const thresholdOut = document.getElementById("thresholdOut");
@@ -46,6 +46,10 @@ const dragGhost = document.getElementById("dragGhost");
 const liveConf = document.getElementById("liveConf");
 const liveConfFill = document.getElementById("liveConfFill");
 const liveConfValue = document.getElementById("liveConfValue");
+const cropHud = document.getElementById("cropHud");
+const cropFrame = document.getElementById("cropFrame");
+const cropHudApply = document.getElementById("cropHudApply");
+const cropHudCancel = document.getElementById("cropHudCancel");
 
 const panes = {
   a: {
@@ -197,17 +201,36 @@ let railScrollRaf = 0;
 thresholdInput.addEventListener("input", () => {
   thresholdOut.textContent = Number(thresholdInput.value).toFixed(2);
 });
-// Crop value is a default / pending amount — only applied via "Crop sel"
-cropInput.addEventListener("change", () => scheduleAutosave());
+thresholdInput.addEventListener("input", () => {
+  thresholdOut.textContent = Number(thresholdInput.value).toFixed(2);
+});
 
-function defaultCropPx() {
-  return Math.max(0, Number(cropInput.value) || 0);
+/**
+ * @param {object} item
+ * @returns {{ top: number, right: number, bottom: number, left: number }}
+ */
+function getItemCrop(item) {
+  if (item.crop && typeof item.crop === "object") {
+    return normalizeCrop(item.img.width, item.img.height, item.crop);
+  }
+  if (typeof item.cropPx === "number" && item.cropPx > 0) {
+    const c = item.cropPx;
+    return normalizeCrop(item.img.width, item.img.height, {
+      top: c,
+      right: c,
+      bottom: c,
+      left: c,
+    });
+  }
+  return normalizeCrop(item.img.width, item.img.height, 0);
 }
 
 function makeTileFromLoaded(item) {
-  const cropPx = item.cropPx ?? 0;
-  const cropped = cropImage(item.img, cropPx, item.file.name);
-  return { ...cropped, id: item.id, cropPx };
+  const crop = getItemCrop(item);
+  item.crop = crop;
+  delete item.cropPx;
+  const cropped = cropImage(item.img, crop, item.file.name);
+  return { ...cropped, id: item.id, crop };
 }
 
 /** Rebuild tile bitmaps from loaded[] without wiping placements. */
@@ -222,46 +245,256 @@ function rebuildTilesKeepPlacements() {
   updateCounts();
 }
 
+/** @deprecated */
+function rebuildTiles() {
+  rebuildTilesKeepPlacements();
+}
+
 /**
- * Apply the Crop field to selected photos only (undoable). Keeps montage.
+ * Crop edit session — full source shown on montage with adjustable frame.
+ * @type {null | {
+ *   id: string,
+ *   idx: number,
+ *   paneId: "a"|"b",
+ *   gid: string,
+ *   z: number,
+ *   fullDx: number,
+ *   fullDy: number,
+ *   srcW: number,
+ *   srcH: number,
+ *   crop: { top:number, right:number, bottom:number, left:number },
+ *   savedTile: object,
+ *   savedPos: { dx:number, dy:number, z?:number },
+ * }}
  */
-function applyCropToSelected() {
-  if (busy) return;
-  if (!selection.length) {
-    setStatus("Select one or more photos, then Crop sel.", "error");
+let cropEdit = null;
+let cropDrag = null;
+
+function zeroCrop() {
+  return { top: 0, right: 0, bottom: 0, left: 0 };
+}
+
+function startCropEditForId(id) {
+  if (busy || cropEdit) return;
+  const idx = indexById(id);
+  if (idx < 0) {
+    setStatus("Select a placed photo on the montage to crop.", "error");
     return;
   }
-  const newCrop = defaultCropPx();
-  pushHistory();
-  let changed = 0;
-  for (const id of selection) {
-    const item = loaded.find((l) => l.id === id);
-    if (!item) continue;
-    const oldCrop = item.cropPx ?? 0;
-    const appliedOld = effectiveCrop(item.img.width, item.img.height, oldCrop);
-    const appliedNew = effectiveCrop(item.img.width, item.img.height, newCrop);
-    if (appliedOld === appliedNew && oldCrop === newCrop) continue;
-    const delta = appliedOld - appliedNew;
-    item.cropPx = newCrop;
-    const idx = indexById(id);
-    if (idx >= 0 && tileGroup.has(idx) && delta !== 0) {
-      const pos = groups.get(tileGroup.get(idx)).get(idx);
-      pos.dx -= delta;
-      pos.dy -= delta;
-    }
-    changed += 1;
+  const gid = tileGroup.get(idx);
+  if (!gid) {
+    setStatus("Place the photo on the montage first, then Crop.", "error");
+    return;
   }
+  const paneId =
+    panes.a.groupId === gid ? "a" : panes.b.groupId === gid ? "b" : focusedPane;
+  const item = loaded.find((l) => l.id === id);
+  if (!item) return;
+  const crop = getItemCrop(item);
+  const pos = groups.get(gid).get(idx);
+  const fullDx = pos.dx - crop.left;
+  const fullDy = pos.dy - crop.top;
+
+  cropEdit = {
+    id,
+    idx,
+    paneId,
+    gid,
+    z: pos.z ?? 0,
+    fullDx,
+    fullDy,
+    srcW: item.img.width,
+    srcH: item.img.height,
+    crop: { ...crop },
+    savedTile: tiles[idx],
+    savedPos: { dx: pos.dx, dy: pos.dy, z: pos.z ?? 0 },
+  };
+
+  // Show full source on the montage while editing
+  const full = cropImage(item.img, zeroCrop(), item.file.name);
+  tiles[idx] = { ...full, id: item.id, crop: zeroCrop() };
+  groups.get(gid).set(idx, { dx: fullDx, dy: fullDy, z: pos.z ?? 0 });
+
+  document.body.classList.add("crop-editing");
+  if (cropHud) cropHud.hidden = false;
+  setFocusedPane(paneId);
+  refreshAllPreviews();
+  syncCropHud();
+  setStatus("Drag edges/corners to crop · Apply or Cancel.");
+  updateButtons();
+}
+
+function cancelCropEdit() {
+  if (!cropEdit) return;
+  const { idx, gid, savedTile, savedPos } = cropEdit;
+  tiles[idx] = savedTile;
+  if (groups.has(gid)) groups.get(gid).set(idx, { ...savedPos });
+  cropEdit = null;
+  cropDrag = null;
+  document.body.classList.remove("crop-editing");
+  if (cropHud) cropHud.hidden = true;
+  refreshAllPreviews();
+  renderThumbs();
+  updateButtons();
+  setStatus("Crop cancelled.");
+}
+
+function applyCropEdit() {
+  if (!cropEdit) return;
+  const edit = cropEdit;
+  const item = loaded.find((l) => l.id === edit.id);
+  if (!item) {
+    cancelCropEdit();
+    return;
+  }
+  pushHistory();
+  const crop = normalizeCrop(edit.srcW, edit.srcH, edit.crop);
+  item.crop = crop;
+  delete item.cropPx;
+  const cropped = cropImage(item.img, crop, item.file.name);
+  tiles[edit.idx] = { ...cropped, id: item.id, crop };
+  groups.get(edit.gid).set(edit.idx, {
+    dx: edit.fullDx + crop.left,
+    dy: edit.fullDy + crop.top,
+    z: edit.z,
+  });
+  cropEdit = null;
+  cropDrag = null;
+  document.body.classList.remove("crop-editing");
+  if (cropHud) cropHud.hidden = true;
+  refreshAllPreviews();
+  renderThumbs();
+  updateButtons();
+  scheduleAutosave();
+  setStatus(
+    isCropped(crop)
+      ? `Crop applied (${crop.left}/${crop.top}/${crop.right}/${crop.bottom}px). Undo to revert.`
+      : "Crop cleared (full image)."
+  );
+}
+
+function uncropById(id) {
+  const item = loaded.find((l) => l.id === id);
+  if (!item) return;
+  const old = getItemCrop(item);
+  if (!isCropped(old)) {
+    setStatus("That photo is not cropped.");
+    return;
+  }
+  pushHistory();
+  const idx = indexById(id);
+  if (idx >= 0 && tileGroup.has(idx)) {
+    const pos = groups.get(tileGroup.get(idx)).get(idx);
+    pos.dx -= old.left;
+    pos.dy -= old.top;
+  }
+  item.crop = zeroCrop();
+  delete item.cropPx;
   tiles = loaded.map(makeTileFromLoaded);
   refreshAllPreviews();
   renderThumbs();
   updateButtons();
-  updateCounts();
   scheduleAutosave();
-  setStatus(
-    changed
-      ? `Crop ${newCrop}px on ${changed} selected — Undo to revert.`
-      : `Selected photos already at crop ${newCrop}px.`
-  );
+  setStatus("Uncropped to full image. Undo to revert.");
+}
+
+function canvasLocalToClient(p, localX, localY) {
+  const wrapRect = p.wrap.getBoundingClientRect();
+  return {
+    x: wrapRect.left + p.panX + localX * p.zoom,
+    y: wrapRect.top + p.panY + localY * p.zoom,
+  };
+}
+
+function syncCropHud() {
+  if (!cropEdit || !cropFrame || !cropHud) return;
+  const p = panes[cropEdit.paneId];
+  const gid = cropEdit.gid;
+  const abs = groups.get(gid);
+  if (!abs || !p.canvas.width) return;
+  const { origin } = compositeMontage(tiles, abs, null);
+  const padX = p.padX || 0;
+  const padY = p.padY || 0;
+  const c = cropEdit.crop;
+  const fullLocalX = cropEdit.fullDx - origin.minX + padX;
+  const fullLocalY = cropEdit.fullDy - origin.minY + padY;
+  const left = fullLocalX + c.left;
+  const top = fullLocalY + c.top;
+  const right = fullLocalX + cropEdit.srcW - c.right;
+  const bottom = fullLocalY + cropEdit.srcH - c.bottom;
+  const tl = canvasLocalToClient(p, left, top);
+  const br = canvasLocalToClient(p, right, bottom);
+  cropFrame.style.left = `${tl.x}px`;
+  cropFrame.style.top = `${tl.y}px`;
+  cropFrame.style.width = `${Math.max(8, br.x - tl.x)}px`;
+  cropFrame.style.height = `${Math.max(8, br.y - tl.y)}px`;
+  cropHud.hidden = false;
+}
+
+function clientToCropLocal(clientX, clientY) {
+  if (!cropEdit) return null;
+  const p = panes[cropEdit.paneId];
+  const mapped = canvasPointerToLocal(p, clientX, clientY);
+  if (!mapped) return null;
+  const gid = cropEdit.gid;
+  const abs = groups.get(gid);
+  const { origin } = compositeMontage(tiles, abs, null);
+  const padX = p.padX || 0;
+  const padY = p.padY || 0;
+  return {
+    x: mapped.localX - padX - (cropEdit.fullDx - origin.minX),
+    y: mapped.localY - padY - (cropEdit.fullDy - origin.minY),
+  };
+}
+
+function onCropHandleDown(e) {
+  if (!cropEdit) return;
+  const handle = e.target.closest?.(".crop-handle");
+  if (!handle) return;
+  e.preventDefault();
+  e.stopPropagation();
+  cropDrag = {
+    handle: handle.dataset.h,
+    start: { ...cropEdit.crop },
+  };
+  const onMove = (ev) => {
+    if (!cropDrag || !cropEdit) return;
+    const loc = clientToCropLocal(ev.clientX, ev.clientY);
+    if (!loc) return;
+    const maxL = cropEdit.srcW - 32;
+    const maxT = cropEdit.srcH - 32;
+    let { top, right, bottom, left } = cropDrag.start;
+    const h = cropDrag.handle;
+    if (h.includes("n")) top = Math.max(0, Math.min(maxT, loc.y));
+    if (h.includes("s")) bottom = Math.max(0, Math.min(maxT, cropEdit.srcH - loc.y));
+    if (h.includes("w")) left = Math.max(0, Math.min(maxL, loc.x));
+    if (h.includes("e")) right = Math.max(0, Math.min(maxL, cropEdit.srcW - loc.x));
+    // Keep minimum 32px content
+    if (cropEdit.srcW - left - right < 32) {
+      if (h.includes("e")) right = cropEdit.srcW - left - 32;
+      if (h.includes("w")) left = cropEdit.srcW - right - 32;
+    }
+    if (cropEdit.srcH - top - bottom < 32) {
+      if (h.includes("s")) bottom = cropEdit.srcH - top - 32;
+      if (h.includes("n")) top = cropEdit.srcH - bottom - 32;
+    }
+    cropEdit.crop = normalizeCrop(cropEdit.srcW, cropEdit.srcH, {
+      top,
+      right,
+      bottom,
+      left,
+    });
+    syncCropHud();
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    cropDrag = null;
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 }
 
 function setStatus(text, kind = "") {
@@ -297,6 +530,7 @@ function applyPaneZoom(id) {
   const p = panes[id];
   p.stage.style.transform = `translate(${p.panX}px, ${p.panY}px) scale(${p.zoom})`;
   p.zoomEl.textContent = `${Math.round(p.zoom * 100)}%`;
+  if (cropEdit && cropEdit.paneId === id) syncCropHud();
 }
 
 /** Zoom so the content point under the cursor stays under the cursor. */
@@ -349,19 +583,21 @@ function fitPaneZoom(id) {
 function updateButtons() {
   const hasResult = Boolean(pane().result);
   clearBtn.disabled = busy || (loaded.length === 0 && !hasResult && history.length === 0);
-  undoBtn.disabled = busy || history.length === 0;
+  undoBtn.disabled = busy || history.length === 0 || Boolean(cropEdit);
   downloadBtn.disabled = busy || !hasResult;
-  if (cropApplyBtn) cropApplyBtn.disabled = busy || selection.length === 0;
-
   const selectedIdx = selection.map((id) => indexById(id)).filter((i) => i >= 0);
   const placedSel = selectedIdx.filter((i) => tileGroup.has(i));
+  if (cropEditBtn) {
+    cropEditBtn.disabled = busy || Boolean(cropEdit) || placedSel.length !== 1;
+  }
+
   const lockedSel = selection.filter((id) => lockedIds.has(id));
   const unlockedPlaced = placedSel.filter((i) => !lockedIds.has(tiles[i].id));
 
-  matchBtn.disabled = busy || selection.length !== 2;
-  lockBtn.disabled = busy || unlockedPlaced.length === 0;
-  unlockBtn.disabled = busy || lockedSel.length === 0;
-  returnBtn.disabled = busy || placedSel.length === 0;
+  matchBtn.disabled = busy || selection.length !== 2 || Boolean(cropEdit);
+  lockBtn.disabled = busy || unlockedPlaced.length === 0 || Boolean(cropEdit);
+  unlockBtn.disabled = busy || lockedSel.length === 0 || Boolean(cropEdit);
+  returnBtn.disabled = busy || placedSel.length === 0 || Boolean(cropEdit);
 }
 
 function updateCounts() {
@@ -394,11 +630,6 @@ function indexById(id) {
   return tiles.findIndex((t) => t.id === id);
 }
 
-/** @deprecated use rebuildTilesKeepPlacements — kept name for call sites that mean "sync tiles" */
-function rebuildTiles() {
-  rebuildTilesKeepPlacements();
-}
-
 function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   const p = panes[id];
   const hadContent = Boolean(p.result);
@@ -416,10 +647,14 @@ function showPreviewOnPane(id, tightCanvas, movingIndex = -1) {
   // Fit after layout so the photo fills Workspace A (not a tiny padded window)
   if (!hadContent && !p.userZoomed) {
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => fitPaneZoom(id));
+      requestAnimationFrame(() => {
+        fitPaneZoom(id);
+        if (cropEdit) syncCropHud();
+      });
     });
   } else {
     applyPaneZoom(id);
+    if (cropEdit) syncCropHud();
   }
   updateButtons();
 }
@@ -506,14 +741,12 @@ function renderThumbs() {
     meta.className = "thumb-meta";
     if (lockedIds.has(item.id)) meta.textContent = gid ? `${gid} · locked` : "locked";
     else if (gid) {
-      const crop = item.cropPx ?? 0;
-      meta.textContent = crop ? `${gid} · crop ${crop}` : gid;
+      meta.textContent = isCropped(getItemCrop(item)) ? `${gid} · cropped` : gid;
     } else if (selection.includes(item.id)) {
       const n = selection.indexOf(item.id) + 1;
       meta.textContent = selection.length <= 2 ? (n === 1 ? "1st" : "2nd") : `#${n}`;
     } else {
-      const crop = item.cropPx ?? 0;
-      meta.textContent = crop ? `crop ${crop} · ${item.file.name}` : item.file.name;
+      meta.textContent = isCropped(getItemCrop(item)) ? `cropped · ${item.file.name}` : item.file.name;
     }
 
     if (gid) {
@@ -1017,9 +1250,9 @@ function snapshotPlacementsById() {
 }
 
 function snapshotCrops() {
-  /** @type {Record<string, number>} */
+  /** @type {Record<string, { top:number, right:number, bottom:number, left:number }>} */
   const crops = {};
-  for (const item of loaded) crops[item.id] = item.cropPx ?? 0;
+  for (const item of loaded) crops[item.id] = { ...getItemCrop(item) };
   return crops;
 }
 
@@ -1027,7 +1260,13 @@ function applyCropsRecord(crops) {
   if (!crops) return;
   for (const item of loaded) {
     if (Object.prototype.hasOwnProperty.call(crops, item.id)) {
-      item.cropPx = crops[item.id];
+      const raw = crops[item.id];
+      if (typeof raw === "number") {
+        item.crop = normalizeCrop(item.img.width, item.img.height, raw);
+      } else {
+        item.crop = normalizeCrop(item.img.width, item.img.height, raw);
+      }
+      delete item.cropPx;
     }
   }
   tiles = loaded.map(makeTileFromLoaded);
@@ -1098,6 +1337,17 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   const key = e.key.toLowerCase();
+  if (key === "escape" && cropEdit) {
+    e.preventDefault();
+    cancelCropEdit();
+    return;
+  }
+  if (key === "enter" && cropEdit) {
+    e.preventDefault();
+    applyCropEdit();
+    return;
+  }
+  if (cropEdit) return; // block other shortcuts while cropping
   if ((e.ctrlKey || e.metaKey) && key === "z") {
     e.preventDefault();
     undoLast();
@@ -1477,7 +1727,7 @@ function autoScrollRail(clientY) {
 }
 
 function startDrag(e, index, originEl = null, grabOffset = null) {
-  if (busy) return;
+  if (busy || cropEdit) return;
   const tileId = tiles[index]?.id;
   if (!tileId) return;
   if (lockedIds.has(tileId) && tileGroup.has(index)) {
@@ -1870,7 +2120,8 @@ async function addFiles(files) {
       url,
       img,
       fingerprint,
-      cropPx: defaultCropPx(),
+      cropPx: 0,
+      crop: { top: 0, right: 0, bottom: 0, left: 0 },
     });
     added += 1;
   }
@@ -2006,14 +2257,13 @@ async function writeAutosave() {
         type: item.file.type || "image/png",
         lastModified: item.file.lastModified || Date.now(),
         size: item.file.size,
-        cropPx: item.cropPx ?? 0,
+        crop: getItemCrop(item),
         blob: item.file,
       });
     }
     await idbPut({
-      v: 1,
+      v: 2,
       savedAt: Date.now(),
-      cropDefault: defaultCropPx(),
       threshold: Number(thresholdInput.value),
       scale: scaleSelect.value,
       workspaceBVisible,
@@ -2085,7 +2335,6 @@ async function restoreAutosave() {
     selection = [];
     lockedIds = new Set(save.lockedIds || []);
 
-    if (typeof save.cropDefault === "number") cropInput.value = String(save.cropDefault);
     if (save.threshold != null) {
       thresholdInput.value = String(save.threshold);
       thresholdOut.textContent = Number(save.threshold).toFixed(2);
@@ -2112,12 +2361,16 @@ async function restoreAutosave() {
         el.onerror = () => reject(new Error(entry.name));
         el.src = url;
       });
+      let crop = entry.crop;
+      if (!crop && typeof entry.cropPx === "number") {
+        crop = { top: entry.cropPx, right: entry.cropPx, bottom: entry.cropPx, left: entry.cropPx };
+      }
       loaded.push({
         id: entry.id,
         file,
         url,
         img,
-        cropPx: entry.cropPx ?? 0,
+        crop: normalizeCrop(img.width, img.height, crop || 0),
         fingerprint: null,
       });
     }
@@ -2206,6 +2459,11 @@ function showTileMenu(clientX, clientY, id) {
     selection = [id];
     renderThumbs();
     refreshAllPreviews();
+  }
+  const item = loaded.find((l) => l.id === (id || selection[0]));
+  const uncropBtn = tileMenu.querySelector('[data-action="uncrop"]');
+  if (uncropBtn) {
+    uncropBtn.hidden = !(item && isCropped(getItemCrop(item)));
   }
   tileMenu.hidden = false;
   const pad = 8;
@@ -2382,10 +2640,19 @@ lockBtn.addEventListener("click", lockSelected);
 unlockBtn.addEventListener("click", unlockSelected);
 returnBtn.addEventListener("click", returnSelectedToRail);
 workspace2Btn.addEventListener("click", toggleWorkspaceB);
-cropApplyBtn?.addEventListener("click", applyCropToSelected);
+cropEditBtn?.addEventListener("click", () => {
+  if (selection.length !== 1) {
+    setStatus("Select one placed photo, then Crop.", "error");
+    return;
+  }
+  startCropEditForId(selection[0]);
+});
 restoreBtn?.addEventListener("click", () => {
   void restoreAutosave();
 });
+cropHudApply?.addEventListener("click", applyCropEdit);
+cropHudCancel?.addEventListener("click", cancelCropEdit);
+cropFrame?.addEventListener("pointerdown", onCropHandleDown);
 railPinBtn?.addEventListener("click", (e) => {
   e.stopPropagation();
   toggleRailPinned();
@@ -2396,7 +2663,10 @@ tileMenu?.addEventListener("click", (e) => {
   if (!btn || btn.disabled) return;
   const action = btn.dataset.action;
   hideTileMenu();
-  if (action === "front" || action === "forward" || action === "backward" || action === "back") {
+  const id = selection[0];
+  if (action === "crop" && id) startCropEditForId(id);
+  else if (action === "uncrop" && id) uncropById(id);
+  else if (action === "front" || action === "forward" || action === "backward" || action === "back") {
     changeLayerOrder(action);
   }
 });

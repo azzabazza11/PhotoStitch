@@ -5,16 +5,61 @@
 const GRAY_WEIGHTS = [0.299, 0.587, 0.114];
 
 /**
- * @param {HTMLImageElement|ImageBitmap} source
- * @param {number} cropPx
- * @returns {{ canvas: HTMLCanvasElement, width: number, height: number, name: string }}
+ * @typedef {{ top: number, right: number, bottom: number, left: number }} CropInsets
  */
-export function cropImage(source, cropPx, name = "image") {
+
+/**
+ * @param {number} imgW
+ * @param {number} imgH
+ * @param {number | CropInsets | null | undefined} crop
+ * @returns {CropInsets}
+ */
+export function normalizeCrop(imgW, imgH, crop) {
+  let top = 0;
+  let right = 0;
+  let bottom = 0;
+  let left = 0;
+  if (typeof crop === "number") {
+    const c = Math.max(0, crop);
+    top = right = bottom = left = c;
+  } else if (crop && typeof crop === "object") {
+    top = Math.max(0, Number(crop.top) || 0);
+    right = Math.max(0, Number(crop.right) || 0);
+    bottom = Math.max(0, Number(crop.bottom) || 0);
+    left = Math.max(0, Number(crop.left) || 0);
+  }
+  const maxL = Math.max(0, imgW - 32);
+  const maxT = Math.max(0, imgH - 32);
+  left = Math.min(left, maxL);
+  right = Math.min(right, Math.max(0, imgW - left - 32));
+  top = Math.min(top, maxT);
+  bottom = Math.min(bottom, Math.max(0, imgH - top - 32));
+  return {
+    top: Math.round(top),
+    right: Math.round(right),
+    bottom: Math.round(bottom),
+    left: Math.round(left),
+  };
+}
+
+export function isCropped(crop) {
+  if (!crop) return false;
+  if (typeof crop === "number") return crop > 0;
+  return Boolean(crop.top || crop.right || crop.bottom || crop.left);
+}
+
+/**
+ * @param {HTMLImageElement|ImageBitmap} source
+ * @param {number | CropInsets} [crop]
+ * @param {string} [name]
+ * @returns {{ canvas: HTMLCanvasElement, width: number, height: number, name: string, crop: CropInsets }}
+ */
+export function cropImage(source, crop = 0, name = "image") {
   const w = source.width;
   const h = source.height;
-  const c = Math.max(0, Math.min(cropPx, Math.floor(Math.min(w, h) / 2) - 8));
-  const cw = w - c * 2;
-  const ch = h - c * 2;
+  const insets = normalizeCrop(w, h, crop);
+  const cw = w - insets.left - insets.right;
+  const ch = h - insets.top - insets.bottom;
   if (cw < 32 || ch < 32) {
     throw new Error(`${name}: crop too large for image size ${w}×${h}`);
   }
@@ -22,10 +67,11 @@ export function cropImage(source, cropPx, name = "image") {
   canvas.width = cw;
   canvas.height = ch;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(source, c, c, cw, ch, 0, 0, cw, ch);
-  return { canvas, width: cw, height: ch, name };
+  ctx.drawImage(source, insets.left, insets.top, cw, ch, 0, 0, cw, ch);
+  return { canvas, width: cw, height: ch, name, crop: insets };
 }
 
+/** @deprecated equal-edge helper — prefer normalizeCrop */
 export function effectiveCrop(imgW, imgH, cropPx) {
   return Math.max(0, Math.min(cropPx, Math.floor(Math.min(imgW, imgH) / 2) - 8));
 }
