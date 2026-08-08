@@ -723,7 +723,7 @@ export function snapNearOffset(reference, moving, guessDx, guessDy, options = {}
  * @param {Tile[]} tiles
  * @param {Map<number, { dx: number, dy: number, z?: number }>} abs
  * @param {{ index: number, dx: number, dy: number } | null} pending
- * @param {{ selectedIds?: Set<string> }} [options]
+ * @param {{ selectedIds?: Set<string>, lockedIds?: Set<string> }} [options]
  */
 export function compositeMontage(tiles, abs, pending = null, options = {}) {
   let minX = Infinity;
@@ -787,23 +787,63 @@ export function compositeMontage(tiles, abs, pending = null, options = {}) {
     pendingRect = { x, y, w: t.width, h: t.height, id: t.id };
   }
 
-  // 1px yellow selection outline (on top of stack)
+  // Selection outline + lock badge
   const selectedIds = options.selectedIds;
-  if (selectedIds && selectedIds.size) {
+  const lockedIdsOpt = options.lockedIds;
+  if ((selectedIds && selectedIds.size) || (lockedIdsOpt && lockedIdsOpt.size)) {
     ctx.save();
-    ctx.lineWidth = 1;
     ctx.setLineDash([]);
-    ctx.strokeStyle = "#f5e26b";
     for (const [i, p] of drawOrder) {
-      if (!selectedIds.has(tiles[i].id)) continue;
+      const id = tiles[i].id;
       const x = p.dx - minX;
       const y = p.dy - minY;
-      ctx.strokeRect(x + 0.5, y + 0.5, tiles[i].width - 1, tiles[i].height - 1);
+      const tw = tiles[i].width;
+      const th = tiles[i].height;
+      const selected = selectedIds?.has(id);
+      const locked = lockedIdsOpt?.has(id);
+      if (selected) {
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#f5e26b";
+        ctx.strokeRect(x + 0.5, y + 0.5, tw - 1, th - 1);
+      }
+      if (locked) {
+        drawLockBadge(ctx, x, y, tw, th, Boolean(selected));
+      }
     }
     ctx.restore();
   }
 
   return { canvas, placed, pendingRect, origin: { minX, minY } };
+}
+
+/** Small lock glyph in the top-right of a tile. */
+function drawLockBadge(ctx, x, y, tw, th, emphasized) {
+  const s = Math.max(14, Math.min(28, Math.round(Math.min(tw, th) / 14)));
+  const bx = x + tw - s - 6;
+  const by = y + 6;
+  ctx.save();
+  ctx.fillStyle = emphasized ? "rgba(245, 226, 107, 0.95)" : "rgba(196, 232, 106, 0.9)";
+  ctx.strokeStyle = "#142016";
+  ctx.lineWidth = Math.max(1, s / 12);
+  // body
+  const bodyW = s * 0.72;
+  const bodyH = s * 0.5;
+  const bodyX = bx + (s - bodyW) / 2;
+  const bodyY = by + s * 0.42;
+  ctx.beginPath();
+  ctx.rect(bodyX, bodyY, bodyW, bodyH);
+  ctx.fill();
+  ctx.stroke();
+  // shackle
+  ctx.beginPath();
+  const cx = bx + s / 2;
+  const cy = by + s * 0.42;
+  const r = bodyW * 0.32;
+  ctx.arc(cx, cy, r, Math.PI, 0, false);
+  ctx.strokeStyle = emphasized ? "#f5e26b" : "#c4e86a";
+  ctx.lineWidth = Math.max(2, s / 7);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**

@@ -8,10 +8,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=27";
+} from "./stitcher.js?v=29";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "27";
+const APP_VERSION = "29";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -187,6 +187,12 @@ let dragBaseOrigin = null;
 let dragPad = { x: 0, y: 0 };
 /** @type {"a" | "b" | null} */
 let dragTargetPane = null;
+/**
+ * Peers moved with the primary drag tile (same group, multi-select).
+ * relDx/relDy are offsets from the primary tile's absolute pose.
+ * @type {{ index: number, relDx: number, relDy: number }[]}
+ */
+let dragPeers = [];
 /**
  * Exact absolute place pose while dragging (matches live preview).
  * Frozen at pointerup before UI teardown so layout shifts cannot skew the drop.
@@ -703,7 +709,10 @@ function refreshPane(id) {
 
   const abs = new Map(groups.get(gid));
   const selectedIds = new Set(selection);
-  const { canvas } = compositeMontage(tiles, abs, null, { selectedIds });
+  const { canvas } = compositeMontage(tiles, abs, null, {
+    selectedIds,
+    lockedIds,
+  });
   showPreviewOnPane(id, canvas);
 }
 
@@ -811,7 +820,7 @@ function onThumbClick(id, e = null) {
   if (busy) return;
   hideTileMenu();
 
-  const multi = e && (e.ctrlKey || e.metaKey);
+  const multi = e && (e.shiftKey || e.ctrlKey || e.metaKey);
 
   if (multi) {
     if (selection.includes(id)) selection = selection.filter((x) => x !== id);
@@ -820,7 +829,7 @@ function onThumbClick(id, e = null) {
     refreshAllPreviews();
     setStatus(
       selection.length
-        ? `${selection.length} selected — arrows nudge · right-click layers · Lock / Match.`
+        ? `${selection.length} selected — drag any one to move the group · arrows nudge · Shift+click to add.`
         : "Selection cleared."
     );
     return;
@@ -831,6 +840,20 @@ function onThumbClick(id, e = null) {
     renderThumbs();
     refreshAllPreviews();
     setStatus("Selection cleared. Click tiles to select, or drag onto a workspace.");
+    return;
+  }
+
+  // Plain click with an existing multi-selection: focus this one (don't auto-match)
+  if (selection.length > 1) {
+    selection = [id];
+    renderThumbs();
+    refreshAllPreviews();
+    const idx = indexById(id);
+    setStatus(
+      tileGroup.has(idx)
+        ? "Selected — Shift+click to multi-select for group move."
+        : "Selected — drag onto a workspace, or Shift+click to multi-select."
+    );
     return;
   }
 
@@ -850,8 +873,8 @@ function onThumbClick(id, e = null) {
   setStatus(
     placed
       ? lockedIds.has(id)
-        ? "Locked tile selected — Unlock to re-drag; arrows disabled until Unlock."
-        : "Selected — yellow outline · arrows nudge (Shift=10px) · right-click layers · ]/[."
+        ? "Locked — Unlock via right-click or Unlock. Lock badge shown on montage."
+        : "Selected — Shift+click more for group move · arrows nudge · right-click Lock / layers."
       : "Selected — drag onto a workspace, or click another to Match."
   );
 }
@@ -1045,6 +1068,7 @@ function lockSelected() {
   pushHistory();
   for (const id of ids) lockedIds.add(id);
   renderThumbs();
+  refreshAllPreviews();
   updateButtons();
   updateCounts();
   setStatus(`Locked ${ids.length} tile${ids.length === 1 ? "" : "s"} — Unlock to move again.`);
@@ -1060,6 +1084,7 @@ function unlockSelected() {
   pushHistory();
   for (const id of ids) lockedIds.delete(id);
   renderThumbs();
+  refreshAllPreviews();
   updateButtons();
   updateCounts();
   setStatus(`Unlocked ${ids.length} tile${ids.length === 1 ? "" : "s"} — drag to re-fit.`);
@@ -1141,6 +1166,43 @@ function absWithoutTile(gid, excludeIndex) {
   const abs = new Map(groups.get(gid));
   abs.delete(excludeIndex);
   return abs;
+}
+
+function absWithoutTiles(gid, excludeIndices) {
+  const abs = new Map(groups.get(gid));
+  for (const i of excludeIndices) abs.delete(i);
+  return abs;
+}
+
+/** Selected unlocked placed tiles in the same montage group as primary (for group drag). */
+function peersForGroupDrag(primaryIndex) {
+  const gid = tileGroup.get(primaryIndex);
+  if (!gid) return [{ index: primaryIndex, relDx: 0, relDy: 0 }];
+  const primaryPos = groups.get(gid).get(primaryIndex);
+  if (!primaryPos) return [{ index: primaryIndex, relDx: 0, relDy: 0 }];
+
+  const selectedPlaced = selection
+    .map((id) => indexById(id))
+    .filter(
+      (i) =>
+        i >= 0 &&
+        tileGroup.get(i) === gid &&
+        !lockedIds.has(tiles[i].id)
+    );
+
+  const indices =
+    selectedPlaced.includes(primaryIndex) && selectedPlaced.length > 1
+      ? selectedPlaced
+      : [primaryIndex];
+
+  return indices.map((i) => {
+    const pos = groups.get(gid).get(i);
+    return {
+      index: i,
+      relDx: pos.dx - primaryPos.dx,
+      relDy: pos.dy - primaryPos.dy,
+    };
+  });
 }
 
 function maxZInGroup(gid) {
@@ -1495,9 +1557,13 @@ function prepareDragBase(paneId, movingIndex = -1) {
   }
 
   const fullAbs = new Map(groups.get(gid));
-  const lifting =
-    movingIndex >= 0 && tileGroup.get(movingIndex) === gid;
-  const baseAbs = lifting ? absWithoutTile(gid, movingIndex) : new Map(fullAbs);
+  const peerIdxs = dragPeers.length
+    ? dragPeers.map((p) => p.index)
+    : movingIndex >= 0
+      ? [movingIndex]
+      : [];
+  const lifting = peerIdxs.some((i) => tileGroup.get(i) === gid);
+  const baseAbs = lifting ? absWithoutTiles(gid, peerIdxs) : new Map(fullAbs);
 
   // Keep the SAME frame as the current montage (including the lifted tile's bounds)
   // so picking up does not resize/re-pad and jump the view.
@@ -1626,14 +1692,23 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
     ctx.drawImage(agreementCanvas, dragPad.x, dragPad.y);
   }
 
+  const peers =
+    dragPeers.length > 0 ? dragPeers : [{ index: movingIndex, relDx: 0, relDy: 0 }];
   ctx.save();
   ctx.globalAlpha = 0.55;
-  ctx.drawImage(tiles[movingIndex].canvas, drawX, drawY);
-  ctx.globalAlpha = 1;
-  ctx.strokeStyle = "rgba(196, 232, 106, 0.95)";
-  ctx.lineWidth = Math.max(2, Math.round(Math.min(p.canvas.width, p.canvas.height) / 250));
-  ctx.setLineDash([8, 5]);
-  ctx.strokeRect(drawX + 1, drawY + 1, tiles[movingIndex].width - 2, tiles[movingIndex].height - 2);
+  const lineW = Math.max(2, Math.round(Math.min(p.canvas.width, p.canvas.height) / 250));
+  for (const peer of peers) {
+    const px = drawX + peer.relDx;
+    const py = drawY + peer.relDy;
+    const t = tiles[peer.index];
+    ctx.drawImage(t.canvas, px, py);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "rgba(196, 232, 106, 0.95)";
+    ctx.lineWidth = lineW;
+    ctx.setLineDash([8, 5]);
+    ctx.strokeRect(px + 1, py + 1, t.width - 2, t.height - 2);
+    ctx.globalAlpha = 0.55;
+  }
   ctx.restore();
 
   const now = performance.now();
@@ -1674,6 +1749,7 @@ function clearMontageDragPreview() {
   dragPad = { x: 0, y: 0 };
   dragGrab = { x: 0, y: 0 };
   dragLastPose = null;
+  dragPeers = [];
   dragScoreTimer = 0;
   dragTargetPane = null;
   for (const p of Object.values(panes)) p.el.classList.remove("drop-hot");
@@ -1791,6 +1867,8 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
   const canLiveSnap = !lockedIds.has(fromId);
 
   document.body.classList.add("dragging-tile");
+
+  dragPeers = peersForGroupDrag(index);
 
   // If lifting from the montage, freeze the current frame immediately so pickup
   // does not resize/re-pad and jump under the cursor.
@@ -2050,6 +2128,8 @@ async function finishDragPlace(movingIndex, paneId, frozenPose) {
     // Exact pixels from the live preview — never re-derive from screen coords after layout changes
     const placeDx = frozenPose.dx;
     const placeDy = frozenPose.dy;
+    const peers =
+      dragPeers.length > 0 ? dragPeers : [{ index: movingIndex, relDx: 0, relDy: 0 }];
 
     let scoreNote = "";
     if (dragCoreCanvas && dragBaseOrigin) {
@@ -2062,15 +2142,31 @@ async function finishDragPlace(movingIndex, paneId, frozenPose) {
     }
 
     const alreadyHistoric = Boolean(wasInGroup && wasInGroup !== gid);
+    if (!alreadyHistoric) pushHistory();
 
-    applyJoin({
-      paneId,
-      targetGroupId: gid,
-      place: { index: movingIndex, dx: placeDx, dy: placeDy },
-      realign: realigning,
-      skipHistory: alreadyHistoric,
-      message: `${realigning ? "Re-placed" : "Placed"} exactly where released.${scoreNote} Drag again to nudge, Match to auto-align, or Lock.`,
-    });
+    const abs = groups.get(gid);
+    for (const peer of peers) {
+      const prev = abs.get(peer.index);
+      abs.set(peer.index, {
+        dx: placeDx + peer.relDx,
+        dy: placeDy + peer.relDy,
+        z: prev?.z ?? nextZForGroup(gid),
+      });
+      tileGroup.set(peer.index, gid);
+    }
+    panes[paneId].groupId = gid;
+    selection = peers.map((p) => tiles[p.index].id);
+    refreshAllPreviews();
+    renderThumbs();
+    updateCounts();
+    updateButtons();
+    scheduleAutosave();
+    const n = peers.length;
+    setStatus(
+      n > 1
+        ? `Moved ${n} selected tiles together.${scoreNote}`
+        : `${realigning ? "Re-placed" : "Placed"} exactly where released.${scoreNote} Drag again to nudge, Match to auto-align, or Lock.`
+    );
   } finally {
     busy = false;
     updateButtons();
@@ -2504,11 +2600,19 @@ function showTileMenu(clientX, clientY, id) {
     renderThumbs();
     refreshAllPreviews();
   }
-  const item = loaded.find((l) => l.id === (id || selection[0]));
+  const itemId = id || selection[0];
+  const item = loaded.find((l) => l.id === itemId);
+  const idx = itemId ? indexById(itemId) : -1;
+  const placed = idx >= 0 && tileGroup.has(idx);
+  const locked = Boolean(itemId && lockedIds.has(itemId));
+
+  const lockBtnEl = tileMenu.querySelector('[data-action="lock"]');
+  const unlockBtnEl = tileMenu.querySelector('[data-action="unlock"]');
   const uncropBtn = tileMenu.querySelector('[data-action="uncrop"]');
-  if (uncropBtn) {
-    uncropBtn.hidden = !(item && isCropped(getItemCrop(item)));
-  }
+  if (lockBtnEl) lockBtnEl.hidden = !placed || locked;
+  if (unlockBtnEl) unlockBtnEl.hidden = !placed || !locked;
+  if (uncropBtn) uncropBtn.hidden = !(item && isCropped(getItemCrop(item)));
+
   tileMenu.hidden = false;
   const pad = 8;
   const menuW = tileMenu.offsetWidth || 180;
@@ -2606,19 +2710,24 @@ function bindPaneInteraction(paneId) {
 
     const id = tiles[hit].id;
 
-    if (e.ctrlKey || e.metaKey) {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
       e.preventDefault();
       e.stopPropagation();
       if (selection.includes(id)) selection = selection.filter((x) => x !== id);
       else selection.push(id);
       renderThumbs();
       refreshAllPreviews();
-      setStatus(`${selection.length} selected — arrows nudge · right-click layers.`);
+      setStatus(
+        `${selection.length} selected — drag any unlocked one to move the group · Shift+click to add.`
+      );
       return;
     }
 
-    selection = [id];
-    renderThumbs();
+    // Clicking a tile already in a multi-selection keeps the group and starts group-drag
+    if (!(selection.length > 1 && selection.includes(id))) {
+      selection = [id];
+      renderThumbs();
+    }
     // Do not refreshAllPreviews here — redrawing before drag makes the montage jump
     if (lockedIds.has(id)) {
       // Locked tile: pan the view instead of moving the photo
@@ -2709,7 +2818,9 @@ tileMenu?.addEventListener("click", (e) => {
   const action = btn.dataset.action;
   hideTileMenu();
   const id = selection[0];
-  if (action === "crop" && id) startCropEditForId(id);
+  if (action === "lock") lockSelected();
+  else if (action === "unlock") unlockSelected();
+  else if (action === "crop" && id) startCropEditForId(id);
   else if (action === "uncrop" && id) uncropById(id);
   else if (action === "front" || action === "forward" || action === "backward" || action === "back") {
     changeLayerOrder(action);
