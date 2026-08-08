@@ -8,10 +8,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=26";
+} from "./stitcher.js?v=27";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "26";
+const APP_VERSION = "27";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -713,6 +713,8 @@ function refreshAllPreviews() {
 }
 
 function renderThumbs() {
+  const scrollTop = railInner?.scrollTop ?? 0;
+  const scrollLeft = railInner?.scrollLeft ?? 0;
   thumbs.replaceChildren();
   for (const item of loaded) {
     const idx = indexById(item.id);
@@ -795,6 +797,14 @@ function renderThumbs() {
   }
   updateButtons();
   updateCounts();
+  if (railInner) {
+    // Keep the photo list scrolled where the user left it (replaceChildren resets scroll)
+    const prev = railInner.style.scrollBehavior;
+    railInner.style.scrollBehavior = "auto";
+    railInner.scrollTop = scrollTop;
+    railInner.scrollLeft = scrollLeft;
+    railInner.style.scrollBehavior = prev;
+  }
 }
 
 function onThumbClick(id, e = null) {
@@ -1475,6 +1485,7 @@ function overRailColumn(clientX, clientY) {
 
 function prepareDragBase(paneId, movingIndex = -1) {
   const gid = groupForPane(paneId);
+  const p = panes[paneId];
   if (!gid) {
     dragBaseCanvas = null;
     dragCoreCanvas = null;
@@ -1482,32 +1493,44 @@ function prepareDragBase(paneId, movingIndex = -1) {
     dragPad = { x: 0, y: 0 };
     return null;
   }
-  const baseAbs =
-    movingIndex >= 0 && tileGroup.get(movingIndex) === gid
-      ? absWithoutTile(gid, movingIndex)
-      : new Map(groups.get(gid));
-  if (!baseAbs.size && movingIndex >= 0 && tileGroup.get(movingIndex) === gid) {
-    // Only this tile in the group — treat as empty base for reposition seed
-    dragBaseCanvas = null;
-    dragCoreCanvas = null;
-    dragBaseOrigin = null;
-    dragPad = { x: 0, y: 0 };
-    return gid;
+
+  const fullAbs = new Map(groups.get(gid));
+  const lifting =
+    movingIndex >= 0 && tileGroup.get(movingIndex) === gid;
+  const baseAbs = lifting ? absWithoutTile(gid, movingIndex) : new Map(fullAbs);
+
+  // Keep the SAME frame as the current montage (including the lifted tile's bounds)
+  // so picking up does not resize/re-pad and jump the view.
+  const { canvas: fullTight, origin } = compositeMontage(tiles, fullAbs, null);
+  const padX = p.padX || 0;
+  const padY = p.padY || 0;
+
+  const core = document.createElement("canvas");
+  core.width = fullTight.width;
+  core.height = fullTight.height;
+  const coreCtx = core.getContext("2d");
+  coreCtx.fillStyle = "#0a120e";
+  coreCtx.fillRect(0, 0, core.width, core.height);
+  const drawOrder = [...baseAbs.entries()].sort(
+    (a, b) => (a[1].z ?? 0) - (b[1].z ?? 0) || a[0] - b[0]
+  );
+  for (const [i, pos] of drawOrder) {
+    coreCtx.drawImage(tiles[i].canvas, pos.dx - origin.minX, pos.dy - origin.minY);
   }
-  if (!baseAbs.size) {
-    dragBaseCanvas = null;
-    dragCoreCanvas = null;
-    dragBaseOrigin = null;
-    dragPad = { x: 0, y: 0 };
-    return null;
-  }
-  const { canvas, origin } = compositeMontage(tiles, baseAbs, null);
-  const pad = workspacePadFor(tiles, movingIndex);
-  const { canvas: padded, padX, padY } = padWorkspace(canvas, pad.x, pad.y);
-  dragCoreCanvas = canvas;
+
+  const { canvas: padded } = padWorkspace(core, padX, padY);
+  dragCoreCanvas = core;
   dragBaseCanvas = padded;
   dragBaseOrigin = origin;
   dragPad = { x: padX, y: padY };
+
+  // Match on-screen bitmap size exactly — never shrink/grow on pickup
+  if (p.canvas.width !== padded.width || p.canvas.height !== padded.height) {
+    // Prefer current display size if pad was already applied the same way
+    if (p.canvas.width === padded.width && p.canvas.height === padded.height) {
+      /* ok */
+    }
+  }
   return gid;
 }
 
@@ -1566,14 +1589,20 @@ function updateMontageDragPreview(movingIndex, clientX, clientY, paneId) {
 
   autoScrollWrap(p.wrap, clientX, clientY);
 
-  // Keep display canvas size locked to drag base — no mid-drag resize (avoids zoom/pan jumps)
-  if (p.canvas.width !== dragBaseCanvas.width || p.canvas.height !== dragBaseCanvas.height) {
+  // Keep display canvas size locked — never resize mid-drag (avoids zoom/pan jumps)
+  if (
+    p.canvas.width !== dragBaseCanvas.width ||
+    p.canvas.height !== dragBaseCanvas.height
+  ) {
+    // Size mismatch means pad/origin drifted — still avoid applyPaneZoom; just blit into current canvas
+    // by drawing the base scaled? Prefer exact match from prepareDragBase.
+    // If still mismatched, update size WITHOUT changing pan/zoom.
     p.canvas.width = dragBaseCanvas.width;
     p.canvas.height = dragBaseCanvas.height;
     p.padX = dragPad.x;
     p.padY = dragPad.y;
     p.wrap.classList.add("has-result");
-    applyPaneZoom(paneId);
+    // Do not call applyPaneZoom / fitPaneZoom — keep view stationary
   }
 
   const mapped = canvasPointerToLocal(p, clientX, clientY);
@@ -1762,6 +1791,21 @@ function startDrag(e, index, originEl = null, grabOffset = null) {
   const canLiveSnap = !lockedIds.has(fromId);
 
   document.body.classList.add("dragging-tile");
+
+  // If lifting from the montage, freeze the current frame immediately so pickup
+  // does not resize/re-pad and jump under the cursor.
+  const homeGid = tileGroup.get(index);
+  if (homeGid) {
+    const homePane =
+      panes.a.groupId === homeGid ? "a" : panes.b.groupId === homeGid ? "b" : focusedPane;
+    dragTargetPane = homePane;
+    dragLastPane = homePane;
+    setFocusedPane(homePane);
+    prepareDragBase(homePane, index);
+    if (dragBaseCanvas) {
+      updateMontageDragPreview(index, e.clientX, e.clientY, homePane);
+    }
+  }
 
   const onMove = (ev) => {
     if (ev.pointerId !== pointerId) return;
@@ -2575,11 +2619,12 @@ function bindPaneInteraction(paneId) {
 
     selection = [id];
     renderThumbs();
-    refreshAllPreviews();
+    // Do not refreshAllPreviews here — redrawing before drag makes the montage jump
     if (lockedIds.has(id)) {
       // Locked tile: pan the view instead of moving the photo
       e.preventDefault();
       e.stopPropagation();
+      refreshAllPreviews();
       startPan(e, paneId);
       setStatus("Locked tile — Unlock to re-drag, or drag empty area / Space to pan.");
       return;
