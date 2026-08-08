@@ -8,10 +8,10 @@ import {
   compositeMontage,
   padWorkspace,
   workspacePadFor,
-} from "./stitcher.js?v=29";
+} from "./stitcher.js?v=30";
 
 /** Shown in the UI — bump with every Pages deploy */
-const APP_VERSION = "29";
+const APP_VERSION = "30";
 
 const drop = document.getElementById("drop");
 const fileInput = document.getElementById("fileInput");
@@ -36,6 +36,7 @@ const matchBtn = document.getElementById("matchBtn");
 const lockBtn = document.getElementById("lockBtn");
 const unlockBtn = document.getElementById("unlockBtn");
 const returnBtn = document.getElementById("returnBtn");
+const deleteBtn = document.getElementById("deleteBtn");
 const panesEl = document.getElementById("panes");
 const cropEditBtn = document.getElementById("cropEditBtn");
 const restoreBtn = document.getElementById("restoreBtn");
@@ -242,7 +243,16 @@ function makeTileFromLoaded(item) {
 /** Rebuild tile bitmaps from loaded[] without wiping placements. */
 function rebuildTilesKeepPlacements() {
   const placements = snapshotPlacementsById();
-  tiles = loaded.map(makeTileFromLoaded);
+  /** @type {typeof tiles} */
+  const next = [];
+  for (const item of loaded) {
+    try {
+      next.push(makeTileFromLoaded(item));
+    } catch (err) {
+      console.warn("Tile rebuild failed", item?.file?.name, err);
+    }
+  }
+  tiles = next;
   restorePlacementsById(placements);
   refreshAllPreviews();
   renderThumbs();
@@ -604,6 +614,7 @@ function updateButtons() {
   lockBtn.disabled = busy || unlockedPlaced.length === 0 || Boolean(cropEdit);
   unlockBtn.disabled = busy || lockedSel.length === 0 || Boolean(cropEdit);
   returnBtn.disabled = busy || placedSel.length === 0 || Boolean(cropEdit);
+  if (deleteBtn) deleteBtn.disabled = busy || selection.length === 0 || Boolean(cropEdit);
 }
 
 function updateCounts() {
@@ -1133,7 +1144,10 @@ function unplaceByIds(ids, { recordHistory = true } = {}) {
 
 function removeSelectedPhotos() {
   if (busy) return;
-  if (!selection.length) return;
+  if (!selection.length) {
+    setStatus("Select photos in the left list (Shift+click for several), then Delete.", "error");
+    return;
+  }
   const ids = [...selection];
   pushHistory();
   unplaceByIds(ids, { recordHistory: false });
@@ -1144,7 +1158,13 @@ function removeSelectedPhotos() {
   const placements = snapshotPlacementsById();
   const lockedSnap = [...lockedIds].filter((id) => !idSet.has(id));
   loaded = loaded.filter((l) => !idSet.has(l.id));
-  tiles = loaded.map(makeTileFromLoaded);
+  tiles = loaded.map((item) => {
+    try {
+      return makeTileFromLoaded(item);
+    } catch (_) {
+      return null;
+    }
+  }).filter(Boolean);
   restorePlacementsById(placements);
   lockedIds = new Set(lockedSnap.filter((id) => indexById(id) >= 0));
   selection = [];
@@ -1154,7 +1174,7 @@ function removeSelectedPhotos() {
   updateCounts();
   updateButtons();
   scheduleAutosave();
-  setStatus(`Removed ${ids.length} photo${ids.length === 1 ? "" : "s"}.`);
+  setStatus(`Removed ${ids.length} photo${ids.length === 1 ? "" : "s"} from the list.`);
 }
 
 function matchSelected() {
@@ -2184,42 +2204,66 @@ function bytesToHex(buf) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function looksLikeImageFile(file) {
+  if (file.type && file.type.startsWith("image/")) return true;
+  return /\.(png|jpe?g|webp|gif|bmp|heic|heif|tif?f|avif)$/i.test(file.name || "");
+}
+
 /**
- * Exact pixel fingerprint (dimensions + SHA-256 of RGBA buffer).
+ * Exact-ish pixel fingerprint — downscaled so large screenshots stay reliable.
  * @param {HTMLImageElement} img
  */
 async function pixelFingerprint(img) {
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
+  if (!w || !h) return `empty:${Math.random()}`;
+  const maxDim = 384;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const dw = Math.max(1, Math.round(w * scale));
+  const dh = Math.max(1, Math.round(h * scale));
   const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
+  c.width = dw;
+  c.height = dh;
   const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0);
-  const { data } = ctx.getImageData(0, 0, w, h);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return `${w}x${h}:${bytesToHex(digest)}`;
+  if (!ctx) return `${w}x${h}:nocanvas`;
+  try {
+    ctx.drawImage(img, 0, 0, dw, dh);
+    const { data } = ctx.getImageData(0, 0, dw, dh);
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return `${w}x${h}:${bytesToHex(digest)}`;
+  } catch (err) {
+    console.warn("Fingerprint failed", err);
+    return `${w}x${h}:fail:${fileNameSafe(img)}`;
+  }
+}
+
+function fileNameSafe(img) {
+  return String(img?.src || "").slice(-24);
 }
 
 async function addFiles(files) {
-  const list = [...files].filter((f) => f.type.startsWith("image/"));
+  const list = [...files].filter(looksLikeImageFile);
   if (!list.length) {
-    setStatus("No image files found.", "error");
+    setStatus("No image files found (png/jpg/webp…).", "error");
     return;
   }
 
   let skippedNameSize = 0;
   let skippedPixels = 0;
+  let failed = 0;
   let added = 0;
+  const addedIds = [];
   /** @type {Set<string>} */
   const seenNameSize = new Set(loaded.map((l) => `${l.file.name}\0${l.file.size}`));
   /** @type {Set<string>} */
   const batchFingerprints = new Set();
   for (const item of loaded) {
-    if (!item.fingerprint) {
-      item.fingerprint = await pixelFingerprint(item.img);
+    try {
+      if (!item.fingerprint) item.fingerprint = await pixelFingerprint(item.img);
+      batchFingerprints.add(item.fingerprint);
+    } catch (_) {
+      /* ignore fingerprint errors on existing */
     }
-    batchFingerprints.add(item.fingerprint);
   }
 
   for (const file of list) {
@@ -2234,17 +2278,22 @@ async function addFiles(files) {
     img.decoding = "async";
     try {
       await new Promise((resolve, reject) => {
-        img.onload = resolve;
+        img.onload = () => resolve();
         img.onerror = () => reject(new Error(`Failed to load ${file.name}`));
         img.src = url;
       });
     } catch (_) {
       URL.revokeObjectURL(url);
-      setStatus(`Failed to load ${file.name}.`, "error");
+      failed += 1;
       continue;
     }
 
-    const fingerprint = await pixelFingerprint(img);
+    let fingerprint;
+    try {
+      fingerprint = await pixelFingerprint(img);
+    } catch (_) {
+      fingerprint = `${img.width}x${img.height}:${nameSizeKey}`;
+    }
     if (batchFingerprints.has(fingerprint)) {
       skippedPixels += 1;
       URL.revokeObjectURL(url);
@@ -2254,22 +2303,26 @@ async function addFiles(files) {
     seenNameSize.add(nameSizeKey);
     batchFingerprints.add(fingerprint);
 
+    const id = `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 7)}`;
     loaded.push({
-      id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 7)}`,
+      id,
       file,
       url,
       img,
       fingerprint,
-      cropPx: 0,
       crop: { top: 0, right: 0, bottom: 0, left: 0 },
     });
+    addedIds.push(id);
     added += 1;
   }
+
+  fileInput.value = "";
 
   if (!added) {
     const parts = [];
     if (skippedNameSize) parts.push(`${skippedNameSize} same name+size`);
     if (skippedPixels) parts.push(`${skippedPixels} identical pixels`);
+    if (failed) parts.push(`${failed} failed to load`);
     setStatus(
       parts.length ? `No new photos — skipped ${parts.join(", ")}.` : "No image files found.",
       "error"
@@ -2280,13 +2333,22 @@ async function addFiles(files) {
   // Append tiles — do not wipe existing montage
   rebuildTilesKeepPlacements();
   scheduleAutosave();
+
+  // Show the newly added thumbs (list grows downward)
+  requestAnimationFrame(() => {
+    if (!railInner) return;
+    railInner.style.scrollBehavior = "auto";
+    railInner.scrollTop = railInner.scrollHeight;
+  });
+
   const skipBits = [];
   if (skippedNameSize) skipBits.push(`${skippedNameSize} name+size`);
   if (skippedPixels) skipBits.push(`${skippedPixels} pixel-identical`);
+  if (failed) skipBits.push(`${failed} failed`);
   setStatus(
     skipBits.length
-      ? `Added ${added}. Skipped duplicates (${skipBits.join(", ")}).`
-      : "Click two overlapping shots, or drag a free tile onto a workspace."
+      ? `Added ${added} to the list. Skipped ${skipBits.join(", ")}.`
+      : `Added ${added} photo${added === 1 ? "" : "s"} to the list.`
   );
 }
 
@@ -2612,6 +2674,12 @@ function showTileMenu(clientX, clientY, id) {
   if (lockBtnEl) lockBtnEl.hidden = !placed || locked;
   if (unlockBtnEl) unlockBtnEl.hidden = !placed || !locked;
   if (uncropBtn) uncropBtn.hidden = !(item && isCropped(getItemCrop(item)));
+  const removeBtnEl = tileMenu.querySelector('[data-action="remove"]');
+  if (removeBtnEl) {
+    removeBtnEl.hidden = !itemId;
+    removeBtnEl.textContent =
+      selection.length > 1 ? `Remove ${selection.length} from list` : "Remove from list";
+  }
 
   tileMenu.hidden = false;
   const pad = 8;
@@ -2793,6 +2861,7 @@ matchBtn.addEventListener("click", matchSelected);
 lockBtn.addEventListener("click", lockSelected);
 unlockBtn.addEventListener("click", unlockSelected);
 returnBtn.addEventListener("click", returnSelectedToRail);
+deleteBtn?.addEventListener("click", removeSelectedPhotos);
 workspace2Btn.addEventListener("click", toggleWorkspaceB);
 cropEditBtn?.addEventListener("click", () => {
   if (selection.length !== 1) {
@@ -2820,6 +2889,7 @@ tileMenu?.addEventListener("click", (e) => {
   const id = selection[0];
   if (action === "lock") lockSelected();
   else if (action === "unlock") unlockSelected();
+  else if (action === "remove") removeSelectedPhotos();
   else if (action === "crop" && id) startCropEditForId(id);
   else if (action === "uncrop" && id) uncropById(id);
   else if (action === "front" || action === "forward" || action === "backward" || action === "back") {

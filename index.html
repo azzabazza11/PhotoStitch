@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=29" />
+  <link rel="stylesheet" href="styles.css?v=30" />
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true"></div>
@@ -29,6 +29,7 @@
           <button type="button" id="lockBtn" class="ghost" disabled>Lock</button>
           <button type="button" id="unlockBtn" class="ghost" disabled>Unlock</button>
           <button type="button" id="returnBtn" class="ghost" disabled>Return</button>
+          <button type="button" id="deleteBtn" class="ghost danger" disabled title="Remove selected photos from the list (Del)">Delete</button>
           <button type="button" id="undoBtn" class="ghost" disabled>Undo</button>
           <button type="button" id="clearBtn" class="ghost" disabled>Clear</button>
           <button type="button" id="downloadBtn" class="ghost" disabled>Download</button>
@@ -120,7 +121,7 @@
     </div>
 
     <footer>
-      <p><span id="appVersionFooter">v?</span> · Shift+click multi-select · group drag · Lock on right-click · crop overlay · autosave · Undo Ctrl+Z</p>
+      <p><span id="appVersionFooter">v?</span> · Shift+click select · Delete removes from list · Lock / crop on right-click · autosave · Undo Ctrl+Z</p>
     </footer>
   </div>
 
@@ -128,6 +129,7 @@
   <div id="tileMenu" class="tile-menu" hidden role="menu" aria-label="Tile actions">
     <button type="button" role="menuitem" data-action="lock">Lock</button>
     <button type="button" role="menuitem" data-action="unlock" hidden>Unlock</button>
+    <button type="button" role="menuitem" data-action="remove">Remove from list</button>
     <hr />
     <button type="button" role="menuitem" data-action="crop">Adjust crop…</button>
     <button type="button" role="menuitem" data-action="uncrop" hidden>Uncrop</button>
@@ -155,6 +157,6 @@
       <button type="button" id="cropHudCancel" class="ghost">Cancel</button>
     </div>
   </div>
-  <script type="module" src="app.js?v=29"></script>
+  <script type="module" src="app.js?v=30"></script>
 </body>
 </html>
