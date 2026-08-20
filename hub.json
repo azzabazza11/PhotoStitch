@@ -1,0 +1,18 @@
+{
+  "id": "photostitch",
+  "title": "PhotoStitch",
+  "version": "30",
+  "category": "Tools",
+  "desc": "Stitch overlapping screenshots (maps, satellite tiles) into one montage PNG. Desktop — pick every join yourself.",
+  "accent": "#7fd4ff",
+  "icon": "⧉",
+  "platforms": ["desktop"],
+  "status": "live",
+  "installable": false,
+  "desktopUrl": "https://azzabazza11.github.io/PhotoStitch/",
+  "appUrl": "https://azzabazza11.github.io/PhotoStitch/",
+  "tags": ["stitch", "screenshots", "maps", "desktop"],
+  "changelog": [
+    {"version": "30", "date": "2026-08-08", "notes": "Fix adding photos to the rail and support multi-select delete."}
+  ]
+}
